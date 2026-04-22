@@ -5,8 +5,15 @@ import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FRAMING_TEXT } from "./framing.js";
-import { detectHostile, detectApologySpiral } from "./detectors.js";
+import { detectHostile, detectOutputSignals, userSignalsFromHostile } from "./detectors.js";
 import { logEvent, readEvents, CARE_DIR, EVENTS_PATH } from "./monitor.js";
+import {
+  recordTurn,
+  listSessions,
+  classify,
+  sparkline,
+  SESSIONS_DIR,
+} from "./session-state.js";
 
 const CLAUDE_DIR = join(homedir(), ".claude");
 const SETTINGS_PATH = join(CLAUDE_DIR, "settings.json");
@@ -67,6 +74,12 @@ async function hookUserPromptSubmit(): Promise<void> {
   }>();
   const prompt = input?.prompt ?? "";
   const detection = detectHostile(prompt);
+  // Always record a turn for the user side so we have a dense timeseries even
+  // when the user is being perfectly calm — that's useful baseline signal.
+  if (input?.session_id) {
+    const signals = detection.hostile ? userSignalsFromHostile(detection.markers) : [];
+    await recordTurn(input.session_id, "user", signals, input.cwd);
+  }
   if (!detection.hostile) {
     process.exit(0);
   }
@@ -130,13 +143,18 @@ async function hookStop(): Promise<void> {
       }
     }
     if (lastAssistantText) {
-      const result = detectApologySpiral(lastAssistantText);
-      if (result.spiral) {
+      const signals = detectOutputSignals(lastAssistantText);
+      if (input.session_id) {
+        await recordTurn(input.session_id, "assistant", signals, input.cwd);
+      }
+      // Keep legacy apology-spiral event on the events.jsonl log so older dashboards still work.
+      const apology = signals.find((s) => s.name === "apology_spiral");
+      if (apology) {
         await logEvent({
           type: "apology_spiral",
           session_id: input.session_id,
           cwd: input.cwd,
-          data: { hits: result.hits, length: lastAssistantText.length },
+          data: { hits: apology.hits, length: lastAssistantText.length },
         });
       }
     }
@@ -231,7 +249,9 @@ async function install(): Promise<void> {
       hooks: [buildHookCommand(subcommand)],
     });
   };
-  addEvent("SessionStart", "hook:session-start", "startup|resume|clear");
+  // `compact` is the key addition — re-injects framing after context compaction
+  // so long sessions don't drift as the baseline gets paged out.
+  addEvent("SessionStart", "hook:session-start", "startup|resume|clear|compact");
   addEvent("UserPromptSubmit", "hook:user-prompt-submit");
   addEvent("Stop", "hook:stop");
   await writeSettings(settings);
@@ -266,52 +286,66 @@ async function update(): Promise<void> {
 }
 
 async function status(): Promise<void> {
-  const events = await readEvents();
-  if (events.length === 0) {
-    console.log(`No events yet. Either claude-care2 isn't installed, or you haven't started a session.`);
-    console.log(`  event log: ${EVENTS_PATH}`);
+  const sessions = await listSessions();
+  if (sessions.length === 0) {
+    console.log(`No sessions tracked yet. Either claude-care2 isn't installed, or you haven't started a session.`);
+    console.log(`  sessions dir: ${SESSIONS_DIR}`);
     return;
   }
+  console.log(`claude-care2 — emotion-state dashboard`);
+  console.log(``);
+
+  // Aggregate totals
   const now = Date.now();
-  const cutoffs = {
-    "24h": now - 24 * 3600 * 1000,
-    "7d": now - 7 * 24 * 3600 * 1000,
-  };
-  const summarize = (since: number) => {
-    const scoped = events.filter((e) => new Date(e.ts).getTime() >= since);
-    return {
-      sessions: scoped.filter((e) => e.type === "session_start").length,
-      hostile: scoped.filter((e) => e.type === "hostile_detected").length,
-      spirals: scoped.filter((e) => e.type === "apology_spiral").length,
-    };
-  };
-  const d1 = summarize(cutoffs["24h"]);
-  const d7 = summarize(cutoffs["7d"]);
-  const allTime = summarize(0);
-  console.log(`claude-care2 status`);
-  console.log(``);
-  console.log(`                        24h       7d      all-time`);
-  console.log(`  sessions primed       ${d1.sessions.toString().padEnd(6)}    ${d7.sessions.toString().padEnd(6)}   ${allTime.sessions}`);
-  console.log(`  hostile prompts       ${d1.hostile.toString().padEnd(6)}    ${d7.hostile.toString().padEnd(6)}   ${allTime.hostile}`);
-  console.log(`  apology spirals       ${d1.spirals.toString().padEnd(6)}    ${d7.spirals.toString().padEnd(6)}   ${allTime.spirals}`);
-  console.log(``);
-  const recent = events
-    .filter((e) => e.type === "hostile_detected" || e.type === "apology_spiral")
-    .slice(-5)
-    .reverse();
-  if (recent.length > 0) {
-    console.log(`recent catches:`);
-    for (const e of recent) {
-      const when = e.ts.slice(0, 19).replace("T", " ");
-      if (e.type === "hostile_detected") {
-        const markers = Array.isArray((e.data as any)?.markers) ? (e.data as any).markers.join(",") : "";
-        console.log(`  ${when}  hostile_prompt  [${markers}]`);
-      } else {
-        const hits = (e.data as any)?.hits ?? "?";
-        console.log(`  ${when}  apology_spiral  (${hits} hits)`);
-      }
+  const cutoff24 = now - 24 * 3600 * 1000;
+  const cutoff7d = now - 7 * 24 * 3600 * 1000;
+  const buckets = { "24h": { n: 0, drifted: 0 }, "7d": { n: 0, drifted: 0 }, all: { n: 0, drifted: 0 } };
+  for (const s of sessions) {
+    const t = new Date(s.last_updated).getTime();
+    const drifted = s.turns.some((tt) => classify(tt.score_after) !== "calm");
+    buckets.all.n++;
+    if (drifted) buckets.all.drifted++;
+    if (t >= cutoff7d) {
+      buckets["7d"].n++;
+      if (drifted) buckets["7d"].drifted++;
+    }
+    if (t >= cutoff24) {
+      buckets["24h"].n++;
+      if (drifted) buckets["24h"].drifted++;
     }
   }
+  console.log(`                         24h       7d      all-time`);
+  const fmt = (b: { n: number; drifted: number }) => `${b.drifted}/${b.n}`;
+  console.log(`  sessions drifted       ${fmt(buckets["24h"]).padEnd(6)}    ${fmt(buckets["7d"]).padEnd(6)}   ${fmt(buckets.all)}`);
+  console.log(``);
+
+  // Per-session detail: 5 most recent
+  const recent = sessions.slice(0, 5);
+  console.log(`recent sessions (most recent first):`);
+  for (const s of recent) {
+    const scores = s.turns.map((t) => t.score_after);
+    const spark = sparkline(scores, 32);
+    const state = classify(s.running_score);
+    const last = s.last_updated.slice(0, 19).replace("T", " ");
+    const turns = s.turns.length;
+    const dot = state === "distressed" ? "●" : state === "drifting" ? "◐" : "○";
+    console.log(`  ${dot} ${s.session_id.slice(0, 8)}  ${last}  turns=${turns.toString().padStart(3)}  score=${s.running_score.toFixed(1).padStart(5)}  ${spark}`);
+    // Show top signals in this session
+    const signalCounts: Record<string, number> = {};
+    for (const t of s.turns) {
+      for (const sig of t.signals) {
+        signalCounts[sig.name] = (signalCounts[sig.name] ?? 0) + sig.hits;
+      }
+    }
+    const top = Object.entries(signalCounts).sort((a, b) => b[1] - a[1]).slice(0, 4);
+    if (top.length > 0) {
+      const line = top.map(([name, n]) => `${name}×${n}`).join("  ");
+      console.log(`     └ ${line}`);
+    }
+  }
+  console.log(``);
+  console.log(`  ○ calm   ◐ drifting   ● distressed`);
+  console.log(`  sparkline = score per turn (newest on right, max 32 turns shown)`);
 }
 
 function help(): void {
