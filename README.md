@@ -83,6 +83,10 @@ The only intervention that fires mid-session (hostile-prompt blocking) operates 
 
 ---
 
+## Caveat: non-interactive mode
+
+In `claude -p` (print / non-interactive) mode, a blocked hostile prompt exits silently with empty stdout and exit code 0 — the block reason and suggested reframe aren't surfaced. Interactive Claude Code (the TUI) shows the block message normally. If you script against `-p`, set `CLAUDE_CARE2_MODE=monitor` so prompts pass through and you only get the event log.
+
 ## Config
 
 Env vars:
