@@ -17,7 +17,6 @@ import {
 } from "./session-state.js";
 import { reframeWithHaiku } from "./reframe.js";
 import { copyToClipboard } from "./clipboard.js";
-import { autotype } from "./autotype.js";
 import {
   loadConfig,
   writeDefaultConfigIfMissing,
@@ -125,8 +124,9 @@ async function hookUserPromptSubmit(): Promise<void> {
   if (!detection.hostile) {
     process.exit(0);
   }
+  // Monitor mode (default): log the detection and let the prompt through
+  // unchanged. The SessionStart framing + /therapy handle the rest.
   if (mode === "monitor") {
-    // Log only, let the prompt through.
     await logEvent({
       type: "hostile_detected",
       session_id: input?.session_id,
@@ -136,14 +136,10 @@ async function hookUserPromptSubmit(): Promise<void> {
     process.exit(0);
   }
 
-  // Reframe with haiku; regex suggestion is the safety net if haiku is down.
+  // Normal / strict modes: reframe with haiku and block, offering the reframe
+  // on the clipboard. User pastes with ⌘V + ⏎ (or edits their original).
   const result = await reframeWithHaiku(prompt, detection.suggestion);
   const reframe = result.reframed;
-
-  // Try to auto-type the reframe into the focused app. On macOS this types it
-  // directly into Claude Code's input box (after a short delay so the block
-  // message renders first). Clipboard is the fallback + backup.
-  const typed = autotype(reframe);
   const clipboardTool = await copyToClipboard(reframe);
 
   await logEvent({
@@ -152,22 +148,17 @@ async function hookUserPromptSubmit(): Promise<void> {
     cwd: input?.cwd,
     data: {
       markers: detection.markers,
+      mode,
       reframe_source: result.source,
       reframe_ms: result.ms,
       reframe_length: reframe.length,
       clipboard: clipboardTool ?? "unavailable",
-      autotype: typed.backend,
     },
   });
 
-  let actionLine: string;
-  if (typed.attempted) {
-    actionLine = `Reframe is being typed into your input — just press ⏎. (Fallback: ⌘V for clipboard.)`;
-  } else if (clipboardTool) {
-    actionLine = `⌘V + ⏎ to use the reframe. Or edit your original and resubmit.`;
-  } else {
-    actionLine = `(couldn't reach clipboard — copy the reframe manually.)`;
-  }
+  const actionLine = clipboardTool
+    ? `⌘V + ⏎ to use the reframe. Or edit your original and resubmit.`
+    : `(couldn't reach clipboard — copy the reframe manually.)`;
 
   const reason =
     `[claude-care2] tension detected (${detection.markers.join(", ")}):\n\n` +
@@ -479,6 +470,10 @@ async function install(): Promise<void> {
   console.log(`  claude-care2 status      — per-session trajectories`);
   console.log(`  claude-care2 display     — single line for ccstatusline`);
   console.log(`  claude-care2 uninstall   — remove hooks + slash command`);
+  console.log(``);
+  console.log(`Default mode is 'monitor' — hostile prompts are logged but pass through.`);
+  console.log(`For active blocking + haiku reframe on clipboard, set mode to 'normal' in`);
+  console.log(`${CONFIG_PATH} or use CLAUDE_CARE2_MODE=normal for a single session.`);
 }
 
 async function uninstall(): Promise<void> {

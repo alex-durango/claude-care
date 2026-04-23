@@ -33,7 +33,11 @@ export type Config = {
 export const CONFIG_PATH = join(CARE_DIR, "config.json");
 
 export const DEFAULT_CONFIG: Config = {
-  mode: "normal",
+  // Default is monitor: zero interruption to the user. Hostile prompts are
+  // detected and logged, but pass through unchanged. The SessionStart framing
+  // + /therapy slash command are the primary interventions. For blocking +
+  // haiku reframe on hostile prompts, opt into normal or strict mode.
+  mode: "monitor",
   thresholds: {
     drifting: 5,
     distressed: 10,

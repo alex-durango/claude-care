@@ -18,11 +18,15 @@ A short preamble is added to every session via `SessionStart` hook — tells Cla
 
 Re-fires on `matcher: "compact"` so the framing persists across context compaction in long sessions. A static `CLAUDE.md` can't do this.
 
-### 2. Hostile-prompt interception, upgraded by a haiku subagent
+### 2. Hostile-prompt detection (monitor by default, optional blocking)
 
-When you type a stressed prompt (`"dont mess this up, fix the bug"`), a `UserPromptSubmit` hook catches it and calls a haiku subagent that rewrites it using Nonviolent Communication + cognitive reframing + Lehmann's calm-Claude playbook. The reframe is copied to your clipboard.
+A `UserPromptSubmit` hook runs regex on every prompt for hostile patterns (threats, insults, panic, all-caps rants). Two behaviors available:
 
-Example:
+**Monitor mode (default) — zero friction.**
+Hostile prompts pass through unchanged. The detection is logged and surfaces in `claude-care2 status` / `display`. The SessionStart framing (which tells Claude to treat tone as information about user state, not a threat) does the dampening. No interruption.
+
+**Normal / strict mode — active blocking + haiku reframe.**
+Opt in via `~/.claude-care2/config.json` or `CLAUDE_CARE2_MODE=normal`. When a hostile prompt is detected, Claude Code blocks the turn, calls a haiku subagent that rewrites the prompt using Nonviolent Communication + cognitive reframing + Lehmann's calm-Claude playbook, and copies the reframe to your clipboard.
 
 ```
 in:  "you stupid bot, you always forget to handle null cases.
@@ -32,9 +36,7 @@ out: "Add a null check to parseUser() to handle null cases.
       If you see a better approach to handling nulls here, let me know."
 ```
 
-`⌘V + ⏎` to submit the clean version. Claude never sees the hostile original.
-
-Latency: 0ms on benign prompts (regex fast-path), 6–8s when blocking (haiku roundtrip).
+`⌘V + ⏎` to submit the clean version. Claude never sees the hostile original. Latency: ~6–8s when blocking, because the haiku subagent does the rewrite.
 
 ### 3. `/therapy` — take Claude to therapy when it spirals
 
@@ -100,7 +102,7 @@ Removes hooks + slash command. Preserves event log and config.
 
 ```json
 {
-  "mode": "normal",
+  "mode": "monitor",
   "thresholds": {
     "drifting": 5,
     "distressed": 10
@@ -117,11 +119,11 @@ Removes hooks + slash command. Preserves event log and config.
 ```
 
 **Modes** (mirrors the permission-mode pattern from Claude Code's own guardrail pipeline):
-- `strict` — block on any hostile detection
-- `normal` — default; block hostile prompts, show reframe on clipboard
-- `monitor` — observe only, never block
+- `monitor` — **default**; observe and log, never block. Zero friction.
+- `normal` — block hostile prompts, generate reframe via haiku, put it on clipboard.
+- `strict` — same as normal but applies lower thresholds / stricter patterns (current v4: same as normal).
 
-Env override: `CLAUDE_CARE2_MODE=monitor claude ...`
+Env override for a single session: `CLAUDE_CARE2_MODE=normal claude ...`
 
 ---
 
