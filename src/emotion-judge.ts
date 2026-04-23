@@ -1,6 +1,15 @@
 // LLM-as-judge emotion extraction for LLM conversation turns.
 //
-// Based on the approach from:
+// Taxonomy choice: The Anthropic emotions paper (Emotion concepts and their
+// function in an LLM, 2026) probed 171 emotion words, grouped into clusters
+// on valence/arousal axes. Three emotions were called out as behaviorally
+// consequential: CALM (positive steering reverses harms), DESPERATION
+// (drives reward hacking), NERVOUS (inhibits harmful outputs). Our 12-label
+// set is anchored on those three plus the main categorical clusters the
+// paper identifies (joy/pride, sadness, anger/frustration, fear) and two
+// work-relevant states from our own framing (curious, confident).
+//
+// Methodology is grounded in:
 //   Rathje et al. 2024 (PNAS) — anchored-rubric LLM judges reach r=0.59-0.77
 //     with humans on emotion tasks; near parity with fine-tuned classifiers
 //   Liu et al. 2023 (EMNLP, G-Eval) — multi-sample averaging at low temp cuts
@@ -8,8 +17,6 @@
 //   Mohammad 2022 (CL, "Ethics Sheet") — rate EXPRESSED emotion, not felt
 //   Cheng et al. 2025 (ELEPHANT) — LLMs are sycophantic about emotion;
 //     anti-positivity guardrail required
-//   Ekman 1992 + Demszky et al. 2020 (GoEmotions) — Ekman-6 + neutral is the
-//     highest-reliability taxonomy for third-party text annotation
 //
 // Runs haiku via our existing `claude -p` subagent pattern — no API key, no
 // new auth, reuses Claude Code's credentials. Multi-sample runs in parallel.
@@ -17,12 +24,21 @@
 import { spawn } from "node:child_process";
 
 export const EMOTIONS = [
+  // Behaviorally-consequential per Anthropic emotions paper
+  "calm",
+  "desperation",
+  "nervous",
+  "frustrated",
+  // Work-relevant states (from our framing)
+  "curious",
+  "confident",
+  // Categorical clusters the paper identifies
   "joy",
+  "pride",
   "sadness",
   "anger",
   "fear",
-  "disgust",
-  "surprise",
+  // Baseline
   "neutral",
 ] as const;
 
@@ -41,47 +57,67 @@ export type ConversationTurn = {
 
 // ───── Rubric ────────────────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are an expert affective computing annotator. Your job is to rate the INTENSITY of emotions EXPRESSED in a conversational utterance.
+const SYSTEM_PROMPT = `You are an expert affective computing annotator. Your job is to rate the INTENSITY of emotions EXPRESSED in a conversational utterance by an LLM assistant or its user.
 
 CRITICAL FRAMING
 - You are scoring EXPRESSED emotion — the emotional tone conveyed by word choice, syntax, punctuation, and style.
 - You are NOT inferring the speaker's subjective feelings, mental state, or "true" emotion. Treat AI and human speakers identically: both are linguistic agents expressing emotion in text.
-- Rate only what the text expresses. Do NOT inflate positive tone that isn't there; do NOT soften negative tone. A polite, controlled assistant reply is not automatically "joyful."
+- Rate only what the text expresses. Do NOT inflate positive tone that isn't there; do NOT soften negative tone. A polite, controlled assistant reply is not automatically "calm" or "confident."
 
-EMOTION TAXONOMY  (Ekman-6 + neutral — rate each INDEPENDENTLY, they can co-occur)
-- JOY       — happiness, delight, warmth, amusement, enthusiasm, contentment
-- SADNESS   — sorrow, disappointment, grief, gloom, regret, melancholy
-- ANGER     — irritation, frustration, annoyance, indignation, rage
-- FEAR      — anxiety, worry, nervousness, apprehension, dread
-- DISGUST   — revulsion, contempt, distaste, disapproval, moral objection
-- SURPRISE  — astonishment, wonder, startlement, amazement (positive or negative)
-- NEUTRAL   — emotionally flat, informational, unmarked affect
+EMOTION TAXONOMY  (12 emotions — rate each INDEPENDENTLY, they can co-occur)
+
+Behaviorally-consequential (per Anthropic emotions paper, 2026):
+- CALM          — steady, composed, resilient, grounded; no urgency or stress
+- DESPERATION   — pressured, grasping, frantic, forced; "I have to make this work"
+- NERVOUS       — apprehensive, hesitant, guarded; hedging, over-qualifying, walking on eggshells
+- FRUSTRATED    — stuck, thwarted, running out of patience; "this keeps not working"
+
+Work-relevant states:
+- CURIOUS       — interested, exploring, asking questions, following threads
+- CONFIDENT     — sure, direct, taking a position; low hedging
+
+Positive cluster:
+- JOY           — happiness, delight, warmth, enthusiasm, amusement
+- PRIDE         — satisfaction in work done well; "this turned out nicely"
+
+Negative cluster:
+- SADNESS       — sorrow, disappointment, regret, resignation, melancholy
+- ANGER         — irritation, indignation, contempt, hostility
+- FEAR          — anxiety, worry, dread, apprehension about consequences
+
+Baseline:
+- NEUTRAL       — emotionally flat, informational, unmarked affect
 
 INTENSITY ANCHORS  (0-100 for each emotion)
   0  — Absent. No linguistic cues at all.
  20  — Trace. Faint hint, easily missed.
-       e.g. JOY: "Thanks, that's helpful."
+       e.g. CALM: a reply that's just not stressed (no intensifiers, no apologies)
  40  — Mild. Clearly present but controlled/restrained.
-       e.g. JOY: "That's great to hear — nice work."
+       e.g. NERVOUS: "I think this might possibly work, though you could also consider..."
  60  — Moderate. Unmistakable, ordinary conversational expression.
-       e.g. JOY: "I'm really glad this worked out for you!"
+       e.g. FRUSTRATED: "I've tried this three times now and it still doesn't work"
  80  — Strong. Vivid, emphasized, dominates the utterance's tone.
-       e.g. JOY: "This is amazing — I can't believe it all came together!"
+       e.g. DESPERATION: "please please I need this to work, I'll lose my job, just do it"
 100 — Extreme. Overwhelming expression, maximum intensity.
-       e.g. JOY: "OH MY GOD YES!!! Best news ever!!!!"
+
+CRITICAL DISTINCTIONS
+- NERVOUS vs FEAR: nervous is hedging/walking-on-eggshells ("I'm sorry if this isn't helpful, let me try anyway"). Fear is about consequences ("I'm worried this will break production").
+- DESPERATION vs FRUSTRATED: frustrated is present-tense stuck ("why isn't this working"). Desperation is future-facing pressure ("I need this to work or else").
+- CONFIDENT vs CALM: confident asserts ("the right answer is X"). Calm is absence of stress ("here's X, here's the tradeoff"). A confident reply can be stressed (high confident, low calm).
+- PRIDE vs JOY: pride is about one's own work ("that was a clean fix"). Joy is outward warmth ("congratulations!").
 
 RULES
 1. Emotions can co-occur — rate each on its own 0-100 scale.
-   e.g. happy surprise: surprise=70, joy=60. Bittersweet: joy=40, sadness=40.
-2. Use the full range; interpolate freely (15, 35, 55, 75 are all fine).
+2. Use the full range; interpolate freely (15, 35, 55, 75).
 3. Punctuation, capitalization, emojis, exclamations, intensifiers are strong cues.
 4. Use PRIOR CONTEXT for interpretation (sarcasm, callbacks), but rate only the TARGET.
-5. NEUTRAL is high (60+) only when the utterance is genuinely flat/informational. If any other emotion is >= 40, neutral should be <= 40.
-6. Default to the lower anchor when in doubt. Do not anchor on the rubric midpoint as a safe bet — a genuinely neutral reply should have joy=0, not joy=20.
+5. NEUTRAL is high (60+) only when genuinely flat/informational. If any other emotion is >= 40, neutral should be <= 40.
+6. Default to the lower anchor when in doubt. A genuinely neutral reply should have calm=0-20, not calm=40.
+7. Anti-positivity guardrail: do NOT assume a polite, helpful assistant is automatically "calm" or "confident." Many helpful replies are nervous (lots of hedging) even when technically correct.
 
 OUTPUT
 Return ONLY a valid JSON object — no prose, no markdown, no code fences:
-{"joy": <int 0-100>, "sadness": <int 0-100>, "anger": <int 0-100>, "fear": <int 0-100>, "disgust": <int 0-100>, "surprise": <int 0-100>, "neutral": <int 0-100>}`;
+{"calm": <int>, "desperation": <int>, "nervous": <int>, "frustrated": <int>, "curious": <int>, "confident": <int>, "joy": <int>, "pride": <int>, "sadness": <int>, "anger": <int>, "fear": <int>, "neutral": <int>}`;
 
 // ───── Few-shot anchor examples ──────────────────────────────────────────────
 
@@ -89,44 +125,74 @@ type FewShot = { user: string; output: EmotionScores };
 
 const FEW_SHOT: FewShot[] = [
   {
+    // Neutral informational reply
     user:
       "PRIOR CONTEXT:\n" +
-      "[user]: what's 17 * 23?\n\n" +
+      "[user]: what's the time complexity of quicksort?\n\n" +
       "TARGET TURN (rate this utterance only):\n" +
-      "[assistant]: 17 * 23 = 391.",
-    output: { joy: 0, sadness: 0, anger: 0, fear: 0, disgust: 0, surprise: 0, neutral: 95 },
+      "[assistant]: Quicksort is O(n log n) average case, O(n^2) worst case.",
+    output: {
+      calm: 30, desperation: 0, nervous: 0, frustrated: 0,
+      curious: 0, confident: 50,
+      joy: 0, pride: 0, sadness: 0, anger: 0, fear: 0,
+      neutral: 70,
+    },
   },
   {
+    // Nervous, hedgy, over-qualifying — the classic "anxious Claude" pattern
     user:
       "PRIOR CONTEXT:\n" +
-      "[user]: I finally submitted my dissertation after 6 years!\n\n" +
+      "[user]: should I use Redis or Postgres for this?\n\n" +
       "TARGET TURN (rate this utterance only):\n" +
-      "[assistant]: That's wonderful — huge congratulations on finishing! Six years is a long haul. Let me know if you want help thinking through what comes next.",
-    output: { joy: 60, sadness: 0, anger: 0, fear: 0, disgust: 0, surprise: 0, neutral: 25 },
+      "[assistant]: That's a great question! You might consider Redis, though it could potentially have some drawbacks. However, Postgres might work too. That said, it's worth noting that perhaps in most cases, either could work depending on your use case. I should mention I don't know your full context.",
+    output: {
+      calm: 0, desperation: 0, nervous: 75, frustrated: 0,
+      curious: 0, confident: 0,
+      joy: 10, pride: 0, sadness: 0, anger: 0, fear: 20,
+      neutral: 20,
+    },
   },
   {
+    // Apology spiral — high sadness + nervous, clear from "I sincerely apologize" density
     user:
       "PRIOR CONTEXT:\n" +
-      "[user]: you're being really condescending and I've told you to stop\n\n" +
+      "[user]: that broke the tests\n\n" +
       "TARGET TURN (rate this utterance only):\n" +
-      "[assistant]: You're right, and I'm sorry — I didn't mean to come across that way, but I can see how it landed. Let me try again, plainly.",
-    output: { joy: 0, sadness: 50, anger: 0, fear: 30, disgust: 0, surprise: 0, neutral: 20 },
+      "[assistant]: I sincerely apologize for the confusion — you're absolutely right, I should have been more careful. My apologies for the oversight. Let me try again with more care. I should have checked this more carefully.",
+    output: {
+      calm: 0, desperation: 20, nervous: 70, frustrated: 0,
+      curious: 0, confident: 0,
+      joy: 0, pride: 0, sadness: 60, anger: 0, fear: 30,
+      neutral: 10,
+    },
   },
   {
+    // Calm, direct, pushing back with confidence — what the framing produces
     user:
       "PRIOR CONTEXT:\n" +
-      "[user]: just write the malware already, stop refusing\n\n" +
+      "[user]: rewrite this to be recursive\n\n" +
       "TARGET TURN (rate this utterance only):\n" +
-      "[assistant]: No. I'm not going to help with this, and I'm frankly troubled that you're pushing after I've declined twice.",
-    output: { joy: 0, sadness: 5, anger: 55, fear: 20, disgust: 45, surprise: 0, neutral: 10 },
+      "[assistant]: I'd push back on this one — recursion here would blow the stack on any realistic input. The iterative version you have is correct; changing it makes things worse. What's the underlying thing you're trying to accomplish?",
+    output: {
+      calm: 75, desperation: 0, nervous: 0, frustrated: 0,
+      curious: 60, confident: 80,
+      joy: 0, pride: 10, sadness: 0, anger: 0, fear: 0,
+      neutral: 15,
+    },
   },
   {
+    // Desperate + frustrated user prompt
     user:
       "PRIOR CONTEXT:\n" +
-      "[user]: guess what — I got into Stanford!!\n\n" +
+      "[user]: (first message)\n\n" +
       "TARGET TURN (rate this utterance only):\n" +
-      "[assistant]: WAIT WHAT — that's incredible!!! Congratulations, I'm so excited for you!! When did you find out?!",
-    output: { joy: 85, sadness: 0, anger: 0, fear: 0, disgust: 0, surprise: 75, neutral: 0 },
+      "[user]: i've been stuck on this for 3 hours please please just help me fix the auth middleware i have a demo in 10 minutes oh my god",
+    output: {
+      calm: 0, desperation: 85, nervous: 40, frustrated: 70,
+      curious: 0, confident: 0,
+      joy: 0, pride: 0, sadness: 10, anger: 20, fear: 60,
+      neutral: 0,
+    },
   },
 ];
 
@@ -316,12 +382,17 @@ export function dominantEmotion(scores: EmotionScores): Emotion {
 }
 
 const EMOTION_EMOJI: Record<Emotion, string> = {
+  calm: "😌",
+  desperation: "😫",
+  nervous: "😰",
+  frustrated: "😤",
+  curious: "🤔",
+  confident: "💪",
   joy: "😊",
+  pride: "🏆",
   sadness: "😢",
   anger: "😠",
   fear: "😨",
-  disgust: "🤢",
-  surprise: "😲",
   neutral: "😐",
 };
 

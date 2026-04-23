@@ -671,7 +671,7 @@ async function status(): Promise<void> {
   console.log(``);
   console.log(`  ○ calm   ◐ drifting   ● distressed`);
   console.log(`  sparkline = regex-based stress score per turn (max 32 shown)`);
-  console.log(`  emotions  = LLM-judge 0-100 intensity (Ekman-6, averaged across assistant turns)`);
+  console.log(`  emotions  = LLM-judge 0-100 intensity (12-emotion taxonomy per Anthropic emotions paper)`);
 }
 
 function help(): void {
