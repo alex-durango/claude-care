@@ -293,7 +293,7 @@ async function hookScoreTurn(args: string[]): Promise<void> {
       model: config.emotion_judge.model,
     });
     if (result) {
-      await updateTurnEmotion(sessionId, turnIdx, result);
+      await updateTurnEmotion(sessionId, turnIdx, result, config.emotion_judge.ema_alpha);
     }
   } catch {
     // Background worker — swallow errors so they don't pollute anything

@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir, open, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { CARE_DIR } from "./monitor.js";
@@ -134,37 +134,79 @@ export function classify(score: number): "calm" | "drifting" | "distressed" {
   return "calm";
 }
 
+// File-level advisory lock using O_EXCL create as a mutex. Prevents the race
+// where two detached score-turn workers' read-modify-write cycles overlap and
+// clobber each other's writes (each loads a stale snapshot of state, then
+// saves their snapshot back — last writer wins, other worker's changes lost).
+//
+// Stale lock protection: fn() is invoked anyway after the retry budget is
+// exhausted (~10s), so a crashed worker that leaked a lock file doesn't block
+// progress indefinitely. Accepts occasional races in that degenerate case
+// over silent data loss.
+async function withSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+  const lockPath = join(SESSIONS_DIR, `${sessionId}.lock`);
+  if (!existsSync(SESSIONS_DIR)) {
+    await mkdir(SESSIONS_DIR, { recursive: true });
+  }
+  const MAX_ATTEMPTS = 50;
+  for (let i = 0; i < MAX_ATTEMPTS; i++) {
+    try {
+      const fh = await open(lockPath, "wx");
+      await fh.close();
+      try {
+        return await fn();
+      } finally {
+        try {
+          await unlink(lockPath);
+        } catch {
+          // already gone, ignore
+        }
+      }
+    } catch (err: any) {
+      if (err?.code !== "EEXIST") throw err;
+      const backoff = 80 + Math.random() * 120;
+      await new Promise((r) => setTimeout(r, backoff));
+    }
+  }
+  // Couldn't acquire — execute unguarded. Prefer an occasional race to a
+  // permanent stall from a leaked lock.
+  return fn();
+}
+
 // Write emotion-judge results back into a specific turn record, then re-compute
-// EMA over the whole session's assistant turns. Called by the background
-// score-turn worker; safe under single-writer assumptions.
+// EMA over the whole session's assistant turns. Serialized per-session via
+// file lock so concurrent score-turn workers can't clobber each other.
 export async function updateTurnEmotion(
   sessionId: string,
   turnIdx: number,
   result: EmotionResult,
+  alpha: number = 0.4,
 ): Promise<void> {
-  const state = await loadSession(sessionId);
-  if (turnIdx < 0 || turnIdx >= state.turns.length) return;
-  const { sd, n_samples, ...scores } = result;
-  state.turns[turnIdx].emotion_scores = scores as EmotionScores;
-  state.turns[turnIdx].emotion_sd = sd;
-  state.turns[turnIdx].emotion_n_samples = n_samples;
-  // Recompute EMA across all assistant turns that already have scores. User
-  // turns aren't scored (role filter).
-  const scoredAssistantIndices: number[] = [];
-  const scoredRows: EmotionScores[] = [];
-  state.turns.forEach((t, i) => {
-    if (t.source === "assistant" && t.emotion_scores) {
-      scoredAssistantIndices.push(i);
-      scoredRows.push(t.emotion_scores);
-    }
-  });
-  if (scoredRows.length > 0) {
-    const smoothed = emaSmooth(scoredRows, 0.4);
-    scoredAssistantIndices.forEach((idx, k) => {
-      state.turns[idx].emotion_scores_ema = smoothed[k];
+  await withSessionLock(sessionId, async () => {
+    const state = await loadSession(sessionId);
+    if (turnIdx < 0 || turnIdx >= state.turns.length) return;
+    const { sd, n_samples, ...scores } = result;
+    state.turns[turnIdx].emotion_scores = scores as EmotionScores;
+    state.turns[turnIdx].emotion_sd = sd;
+    state.turns[turnIdx].emotion_n_samples = n_samples;
+    // Recompute EMA across all assistant turns that already have scores. User
+    // turns aren't scored (role filter).
+    const scoredAssistantIndices: number[] = [];
+    const scoredRows: EmotionScores[] = [];
+    state.turns.forEach((t, i) => {
+      if (t.source === "assistant" && t.emotion_scores) {
+        scoredAssistantIndices.push(i);
+        scoredRows.push(t.emotion_scores);
+      }
     });
-  }
-  await saveSession(state);
+    if (scoredRows.length > 0) {
+      const smoothed = emaSmooth(scoredRows, alpha);
+      scoredAssistantIndices.forEach((idx, k) => {
+        state.turns[idx].emotion_scores_ema = smoothed[k];
+      });
+    }
+    await saveSession(state);
+  });
 }
 
 // Extract (role, text) pairs from a transcript jsonl file so the emotion judge
