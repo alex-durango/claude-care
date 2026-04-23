@@ -247,20 +247,114 @@ ${recent}`;
   }
 }
 
-// Fire off the emotion-judge worker in the background. We use `setsid`-style
-// detachment so Claude Code's Stop hook returns immediately while the haiku
-// call completes asynchronously and writes results to session state.
+// Fire off the emotion-judge worker truly in the background. We can't just
+// rely on `detached: true` + `unref()` — empirically Claude Code's hook
+// process tree takes out detached children when the hook returns, dropping
+// the majority of scoring attempts.
+//
+// Instead: spawn via `sh -c 'nohup node ... &'`. The shell exits immediately
+// after backgrounding the node worker, which gets reparented to init and
+// survives anything that happens to the hook's process group.
 function spawnScoreTurn(sessionId: string, turnIdx: number): void {
-  const proc = spawn(
-    process.execPath, // same node binary that's running us
-    [cliEntryPath(), "hook:score-turn", sessionId, String(turnIdx)],
-    {
-      detached: true,
-      stdio: "ignore",
-      env: { ...process.env, CLAUDE_CARE_INTERNAL: "1" },
-    },
-  );
+  const node = process.execPath;
+  const cli = cliEntryPath();
+  // JSON-stringify to get safe shell quoting for all args
+  const q = (s: string) => JSON.stringify(s);
+  const cmdLine =
+    `CLAUDE_CARE_INTERNAL=1 nohup ${q(node)} ${q(cli)} hook:score-turn ` +
+    `${q(sessionId)} ${q(String(turnIdx))} >/dev/null 2>&1 &`;
+  const proc = spawn("/bin/sh", ["-c", cmdLine], {
+    detached: true,
+    stdio: "ignore",
+  });
   proc.unref();
+}
+
+// Safety-net command: score any unscored assistant turns in a session (or the
+// most recent one if omitted). Useful when the detached background worker
+// didn't survive long enough to write results during the live session.
+async function rescore(args: string[]): Promise<void> {
+  const config = await loadConfig();
+  if (!config.emotion_judge.enabled) {
+    console.log(`emotion_judge is disabled in config; nothing to do.`);
+    return;
+  }
+  const sessionIdArg = args.find((a) => !a.startsWith("--"));
+  let state: Awaited<ReturnType<typeof loadSession>> | null;
+  if (sessionIdArg) {
+    state = await loadSession(sessionIdArg);
+  } else {
+    state = await mostRecentSession();
+  }
+  if (!state) {
+    console.log(`no session found`);
+    return;
+  }
+  const unscoredIndices: number[] = [];
+  state.turns.forEach((t, i) => {
+    if (t.source === "assistant" && !t.emotion_scores) {
+      unscoredIndices.push(i);
+    }
+  });
+  if (unscoredIndices.length === 0) {
+    console.log(`session ${state.session_id.slice(0, 8)}: all assistant turns already scored`);
+    return;
+  }
+  console.log(
+    `session ${state.session_id.slice(0, 8)}: ${unscoredIndices.length} unscored assistant turn(s) — scoring now…`,
+  );
+  // Resolve transcript path (stored or derived)
+  let transcriptPath = state.transcript_path;
+  if (!transcriptPath || !existsSync(transcriptPath)) {
+    const derived = deriveTranscriptPath(state.session_id, state.cwd);
+    if (derived && existsSync(derived)) transcriptPath = derived;
+  }
+  if (!transcriptPath || !existsSync(transcriptPath)) {
+    console.error(`no transcript available for this session; cannot score.`);
+    process.exit(1);
+  }
+  const conversation = await readConversation(transcriptPath, 60);
+  // Map each unscored session-state turn to the corresponding assistant entry
+  // in the conversation array by order.
+  const assistantInConv = conversation
+    .map((t, i) => ({ t, i }))
+    .filter((x) => x.t.role === "assistant");
+  // Walk session turns to map assistant-state-indices to assistant-conversation-indices
+  const assistantStateIndices = state.turns
+    .map((t, i) => ({ t, i }))
+    .filter((x) => x.t.source === "assistant")
+    .map((x) => x.i);
+  let completed = 0;
+  for (const stateIdx of unscoredIndices) {
+    const assistantOrder = assistantStateIndices.indexOf(stateIdx);
+    if (assistantOrder < 0) continue;
+    // Find the corresponding entry in the conversation. If the conversation
+    // has more assistant turns than state (uncommon but possible on long
+    // sessions after compaction), take the Nth from the start.
+    const convEntry = assistantInConv[assistantOrder];
+    if (!convEntry) continue;
+    process.stdout.write(`  scoring turn ${stateIdx}… `);
+    const result = await scoreTurn(conversation, convEntry.i, {
+      nSamples: config.emotion_judge.n_samples,
+      contextWindow: config.emotion_judge.context_window,
+      timeoutMs: config.emotion_judge.timeout_ms,
+      model: config.emotion_judge.model,
+    });
+    if (result) {
+      await updateTurnEmotion(
+        state.session_id,
+        stateIdx,
+        result,
+        config.emotion_judge.ema_alpha,
+      );
+      process.stdout.write(`ok\n`);
+      completed++;
+    } else {
+      process.stdout.write(`skipped (haiku unavailable)\n`);
+    }
+  }
+  console.log(``);
+  console.log(`done: ${completed}/${unscoredIndices.length} turn(s) scored`);
 }
 
 async function hookScoreTurn(args: string[]): Promise<void> {
@@ -805,6 +899,7 @@ function help(): void {
   console.log(`  status            per-session emotion trajectories`);
   console.log(`  display           single-line status (for ccstatusline)`);
   console.log(`  viz               launch Next.js dashboard on localhost:37778`);
+  console.log(`  rescore [id]      score any unscored turns in a session (catches misses)`);
   console.log(`  therapy-summary   haiku-generated technical summary (used inside /therapy)`);
   console.log(`  help              this message`);
   console.log(``);
@@ -837,6 +932,8 @@ async function main(): Promise<void> {
         return await therapySummary();
       case "viz":
         return await viz(process.argv.slice(3));
+      case "rescore":
+        return await rescore(process.argv.slice(3));
       case "hook:session-start":
         return await hookSessionStart();
       case "hook:user-prompt-submit":
