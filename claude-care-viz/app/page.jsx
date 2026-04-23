@@ -247,6 +247,90 @@ const TWEAK_ROWS = [
   { key: "dotStyle",  label: "dot style", opts: ["circle", "emoji"] },
 ];
 
+function SessionPicker({ sessions, currentId, pinned, open, setOpen, onSelect, onSwitchLive }) {
+  const currentLabel = currentId ? currentId.slice(0, 8) : "…";
+  const state = pinned ? "past" : "live";
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e) => {
+      if (!e.target.closest?.(".session-picker")) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [open, setOpen]);
+
+  const formatRelative = (iso) => {
+    try {
+      const d = new Date(iso);
+      const now = new Date();
+      const dh = Math.floor((now - d) / (1000 * 60 * 60));
+      if (dh < 1) {
+        const dm = Math.max(0, Math.floor((now - d) / (1000 * 60)));
+        return `${dm}m ago`;
+      }
+      if (dh < 24) return `${dh}h ago`;
+      const dd = Math.floor(dh / 24);
+      return `${dd}d ago`;
+    } catch {
+      return "?";
+    }
+  };
+
+  const stateDot = (s) => (s === "distressed" ? "●" : s === "drifting" ? "◐" : "○");
+
+  return (
+    <span className="session-picker">
+      <button
+        type="button"
+        className={"session-toggle " + state}
+        onClick={() => setOpen(!open)}
+        aria-label="switch session"
+      >
+        <span className="dim">· {state} ·</span>
+        <span className="sid">{currentLabel}</span>
+        <span className="caret">{open ? "▴" : "▾"}</span>
+      </button>
+      {open && (
+        <div className="session-menu">
+          <div className="session-menu-head">sessions ({sessions.length})</div>
+          <ul>
+            {sessions.map((s, idx) => {
+              const isCurrent = s.session_id === currentId;
+              const isLive = idx === 0 && !pinned && isCurrent;
+              return (
+                <li
+                  key={s.session_id}
+                  className={"session-row" + (isCurrent ? " active" : "")}
+                  onClick={() => {
+                    if (idx === 0) onSwitchLive();
+                    onSelect(s.session_id);
+                  }}
+                >
+                  <span className={"state " + s.drift_state}>{stateDot(s.drift_state)}</span>
+                  <span className="sid">{s.session_id.slice(0, 8)}</span>
+                  <span className="when">{formatRelative(s.last_updated)}</span>
+                  <span className="turns">{s.turn_count}t</span>
+                  <span className="emo">
+                    {s.dominant_emotion
+                      ? `${s.dominant_emotion.name} ${s.dominant_emotion.intensity}`
+                      : "—"}
+                  </span>
+                  {isLive && <span className="live-badge">live</span>}
+                </li>
+              );
+            })}
+            {sessions.length === 0 && (
+              <li className="session-row empty">no sessions yet</li>
+            )}
+          </ul>
+        </div>
+      )}
+    </span>
+  );
+}
+
 function TweaksPanel({ open, onClose, tweaks, setTweak, focus }) {
   return (
     <div className={"tweaks" + (open ? " open" : "")}>
@@ -320,48 +404,95 @@ export default function Page() {
   const [activeIdx, setActiveIdx] = useState(INITIAL_PROMPTS.length - 1);
   const [liveMode, setLiveMode] = useState(false);
   const [sessionId, setSessionId] = useState(null);
+  const [sessionList, setSessionList] = useState([]); // [{session_id, last_updated, turn_count, dominant_emotion, drift_state}]
+  const [sessionPinned, setSessionPinned] = useState(false); // true once user picks a non-live session
+  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
 
-  // Fetch the most recent real session from the claude-care CLI state and
-  // poll every 5s for updates. Falls back to INITIAL_PROMPTS if no sessions
-  // exist yet (first-time users see a working demo instead of an empty page).
+  // Fetch the session list (for the topbar dropdown). Re-fetched with each poll
+  // so new sessions appear without a page refresh.
+  const fetchSessionList = async () => {
+    try {
+      const res = await fetch("/api/sessions", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data.sessions)) setSessionList(data.sessions);
+    } catch {}
+  };
+
+  // Fetch the currently-selected session (or /latest if none pinned).
+  const fetchActiveSession = async () => {
+    try {
+      const url = sessionPinned && sessionId
+        ? `/api/sessions/${sessionId}`
+        : "/api/sessions/latest";
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) throw new Error(`http ${res.status}`);
+      const data = await res.json();
+      if (data.prompts && data.prompts.length > 0) {
+        setPrompts((prev) => {
+          if (prev !== INITIAL_PROMPTS && prev.length === data.prompts.length) {
+            const lastPrev = prev[prev.length - 1];
+            const lastNew = data.prompts[data.prompts.length - 1];
+            if (lastPrev?.t === lastNew?.t && lastPrev?.emotion === lastNew?.emotion) {
+              return prev;
+            }
+          }
+          return data.prompts;
+        });
+        setLiveMode(true);
+        if (!sessionPinned) setSessionId(data.session_id ?? null);
+      }
+    } catch {
+      // Silent fallback — demo mode stays.
+    }
+  };
+
   useEffect(() => {
     let cancelled = false;
     let timer;
-
-    const pull = async () => {
-      try {
-        const res = await fetch("/api/sessions/latest", { cache: "no-store" });
-        if (!res.ok) throw new Error(`http ${res.status}`);
-        const data = await res.json();
-        if (cancelled) return;
-        if (data.prompts && data.prompts.length > 0) {
-          setPrompts((prev) => {
-            // Only update if content actually changed (cheap deep-ish check
-            // via last-updated stamp to avoid re-rendering on each poll).
-            if (prev !== INITIAL_PROMPTS && prev.length === data.prompts.length) {
-              const lastPrev = prev[prev.length - 1];
-              const lastNew = data.prompts[data.prompts.length - 1];
-              if (lastPrev?.t === lastNew?.t && lastPrev?.emotion === lastNew?.emotion) {
-                return prev;
-              }
-            }
-            return data.prompts;
-          });
-          setLiveMode(true);
-          setSessionId(data.session_id ?? null);
-        }
-      } catch {
-        // Silent fallback — demo mode stays.
-      }
+    const tick = async () => {
+      if (cancelled) return;
+      await fetchSessionList();
+      await fetchActiveSession();
     };
-
-    pull();
-    timer = setInterval(pull, 5000);
+    tick();
+    timer = setInterval(tick, 5000);
     return () => {
       cancelled = true;
       if (timer) clearInterval(timer);
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionPinned, sessionId]);
+
+  const switchSession = (targetId) => {
+    if (!targetId) return;
+    setSessionId(targetId);
+    setSessionPinned(true);
+    setSessionMenuOpen(false);
+  };
+
+  const switchToLive = () => {
+    setSessionPinned(false);
+    setSessionMenuOpen(false);
+  };
+
+  // Cycle prev/next session by last_updated order. Wraps around.
+  const cycleSession = (direction) => {
+    if (sessionList.length === 0) return;
+    const currentIdx = sessionList.findIndex((s) => s.session_id === sessionId);
+    const safeIdx = currentIdx === -1 ? 0 : currentIdx;
+    const n = sessionList.length;
+    const nextIdx = (safeIdx + direction + n) % n;
+    const next = sessionList[nextIdx];
+    if (!next) return;
+    // If we land back on the latest session, unpin so live mode resumes.
+    if (nextIdx === 0) {
+      switchToLive();
+      setSessionId(next.session_id);
+    } else {
+      switchSession(next.session_id);
+    }
+  };
 
   // Keep the active index pinned to the newest prompt when new data arrives,
   // unless the user has scrolled back to inspect earlier turns.
@@ -428,6 +559,10 @@ export default function Page() {
       if (k === "t") { e.preventDefault(); setTweaksOpen(true); setTweakFocus({ row: 0, opt: 0 }); return; }
       if (k === "j" || k === "ArrowDown") { e.preventDefault(); setActiveIdx(i => Math.min(prompts.length - 1, i + 1)); return; }
       if (k === "k" || k === "ArrowUp")   { e.preventDefault(); setActiveIdx(i => Math.max(0, i - 1)); return; }
+      // Left/right: switch session. Newest = index 0, so "right" moves newer (=idx-1),
+      // "left" moves older (=idx+1). Feels natural: right cycles toward the live session.
+      if (k === "ArrowRight" || k === "L") { e.preventDefault(); cycleSession(-1); return; }
+      if (k === "ArrowLeft"  || k === "H") { e.preventDefault(); cycleSession(1);  return; }
       if (k === "G" || k === "$" || k === "End") { e.preventDefault(); setActiveIdx(prompts.length - 1); return; }
       if (k === "0" || k === "Home") { e.preventDefault(); setActiveIdx(0); return; }
       if (k === "g") {
@@ -440,7 +575,8 @@ export default function Page() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [helpOpen, tweaksOpen, tweakFocus.row, tweakFocus.opt, prompts.length]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [helpOpen, tweaksOpen, tweakFocus.row, tweakFocus.opt, prompts.length, sessionList, sessionId]);
 
   const current = prompts[activeIdx] || prompts[prompts.length - 1];
   const currentEmotion = current.emotion;
@@ -474,9 +610,15 @@ export default function Page() {
           <div className="tagline">
             your ai needs therapy
             {liveMode ? (
-              <span style={{ marginLeft: "1.5em", opacity: 0.7 }}>
-                · live · {sessionId ? sessionId.slice(0, 8) : ""}
-              </span>
+              <SessionPicker
+                sessions={sessionList}
+                currentId={sessionId}
+                pinned={sessionPinned}
+                open={sessionMenuOpen}
+                setOpen={setSessionMenuOpen}
+                onSelect={switchSession}
+                onSwitchLive={switchToLive}
+              />
             ) : (
               <span style={{ marginLeft: "1.5em", opacity: 0.5 }}>· demo</span>
             )}
@@ -559,6 +701,8 @@ export default function Page() {
 
         <div className="keybar">
           <span className="kgroup"><span className="kbd">j</span><span className="kbd">k</span><span>prompt ↓↑</span></span>
+          <span className="sep">│</span>
+          <span className="kgroup"><span className="kbd">←</span><span className="kbd">→</span><span>session prev/next</span></span>
           <span className="sep">│</span>
           <span className="kgroup"><span className="kbd">gg</span><span className="kbd">G</span><span>first / last</span></span>
           <span className="sep">│</span>
