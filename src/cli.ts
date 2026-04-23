@@ -13,14 +13,32 @@ import {
   classify,
   sparkline,
   SESSIONS_DIR,
+  mostRecentSession,
 } from "./session-state.js";
 import { reframeWithHaiku } from "./reframe.js";
 import { copyToClipboard } from "./clipboard.js";
+import {
+  loadConfig,
+  writeDefaultConfigIfMissing,
+  effectiveMode,
+  CONFIG_PATH,
+  DEFAULT_CONFIG,
+} from "./config.js";
+import { spawn } from "node:child_process";
 
 const CLAUDE_DIR = join(homedir(), ".claude");
 const SETTINGS_PATH = join(CLAUDE_DIR, "settings.json");
-const HOOK_ID = "claude-care2";
-const HOOK_MARKER = { source: HOOK_ID } as const;
+const COMMANDS_DIR = join(CLAUDE_DIR, "commands");
+const THERAPY_COMMAND_PATH = join(COMMANDS_DIR, "therapy.md");
+const PROJECTS_DIR = join(CLAUDE_DIR, "projects");
+
+// Claude Code stores transcripts at ~/.claude/projects/<slugified-cwd>/<session_id>.jsonl
+// where slugified-cwd replaces all "/" with "-" (including the leading one).
+function deriveTranscriptPath(sessionId: string, cwd?: string): string | null {
+  if (!sessionId || !cwd) return null;
+  const slug = cwd.replace(/\//g, "-");
+  return join(PROJECTS_DIR, slug, `${sessionId}.jsonl`);
+}
 
 type HookCommand = { type: "command"; command: string; claudeCare?: true };
 type HookEntry = { matcher?: string; hooks: HookCommand[] };
@@ -87,15 +105,25 @@ async function hookUserPromptSubmit(): Promise<void> {
   }>();
   const prompt = input?.prompt ?? "";
   const detection = detectHostile(prompt);
-  // Record a user turn either way for the timeseries.
+  // Record a user turn either way for the timeseries. Also stamp the derived
+  // transcript path into session state — Stop doesn't always fire in -p mode
+  // so UserPromptSubmit is our only guaranteed hook to seed this.
   if (input?.session_id) {
     const signals = detection.hostile ? userSignalsFromHostile(detection.markers) : [];
-    await recordTurn(input.session_id, "user", signals, input.cwd);
+    const derivedTranscript = deriveTranscriptPath(input.session_id, input.cwd);
+    await recordTurn(
+      input.session_id,
+      "user",
+      signals,
+      input.cwd,
+      derivedTranscript ?? undefined,
+    );
   }
+  const config = await loadConfig();
+  const mode = effectiveMode(config);
   if (!detection.hostile) {
     process.exit(0);
   }
-  const mode = process.env.CLAUDE_CARE2_MODE ?? "block";
   if (mode === "monitor") {
     // Log only, let the prompt through.
     await logEvent({
@@ -136,9 +164,130 @@ async function hookUserPromptSubmit(): Promise<void> {
     `reframe ready${clipboardTool ? " on your clipboard" : ""}:\n\n` +
     `  ${reframe}\n\n` +
     `${clipboardLine}\n` +
-    `Disable this check: CLAUDE_CARE2_MODE=monitor    Uninstall: claude-care2 uninstall`;
+    `Mode: ${mode}  ·  disable per-prompt: CLAUDE_CARE2_MODE=monitor  ·  uninstall: claude-care2 uninstall`;
   const output = { decision: "block", reason };
   process.stdout.write(JSON.stringify(output));
+}
+
+// -------- therapy-summary: runs in a bash substitution inside /therapy.md ---
+
+async function therapySummary(): Promise<void> {
+  // Slash commands run as bash subprocesses, not inside the session, so we
+  // don't have the session_id. Best effort: use the most recently updated
+  // session on disk — this is almost always the active one.
+  const session = await mostRecentSession();
+  if (!session) {
+    console.log("(no recent session — summarize from memory)");
+    return;
+  }
+  // Resolve transcript path: stored → derived → null
+  let transcriptPath = session.transcript_path;
+  if (!transcriptPath || !existsSync(transcriptPath)) {
+    const derived = deriveTranscriptPath(session.session_id, session.cwd);
+    if (derived && existsSync(derived)) transcriptPath = derived;
+  }
+  if (!transcriptPath || !existsSync(transcriptPath)) {
+    console.log("(transcript file not found — summarize from memory)");
+    return;
+  }
+
+  // Pull the last N turns as compact text for haiku to summarize. Skip tool
+  // results to keep the summary budget focused on reasoning + outcomes.
+  let transcriptRaw: string;
+  try {
+    transcriptRaw = await readFile(transcriptPath, "utf8");
+  } catch {
+    console.log("(transcript unreadable — summarize from memory)");
+    return;
+  }
+  const turns: string[] = [];
+  for (const line of transcriptRaw.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const msg = JSON.parse(line);
+      if (msg.type === "user" && typeof msg.message?.content === "string") {
+        turns.push(`USER: ${msg.message.content.slice(0, 500)}`);
+      } else if (msg.type === "assistant" && msg.message?.content) {
+        const content = msg.message.content;
+        if (Array.isArray(content)) {
+          const text = content
+            .filter((c: any) => c.type === "text")
+            .map((c: any) => c.text)
+            .join("\n");
+          if (text) turns.push(`ASSISTANT: ${text.slice(0, 800)}`);
+        } else if (typeof content === "string") {
+          turns.push(`ASSISTANT: ${content.slice(0, 800)}`);
+        }
+      }
+    } catch {
+      // skip malformed
+    }
+  }
+  const recent = turns.slice(-20).join("\n\n");
+  if (!recent) {
+    console.log("(transcript empty — summarize from memory)");
+    return;
+  }
+
+  const instruction = `Summarize the current technical state of this coding session. Include: what the user is working on, what files/components are involved, what has been decided, what is still open. EXCLUDE any apologies, self-criticism, frustration, or emotional framing. 4-6 bullet points, no preamble, no trailing commentary.
+
+Session turns:
+${recent}`;
+
+  const summary = await runHaikuSummary(instruction);
+  if (summary) {
+    console.log(summary);
+  } else {
+    console.log("(haiku summary unavailable — summarize from memory)");
+  }
+}
+
+function runHaikuSummary(instruction: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const proc = spawn(
+      "claude",
+      ["-p", instruction, "--model", "haiku", "--output-format", "text"],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, CLAUDE_CARE2_INTERNAL: "1" },
+      },
+    );
+    let stdout = "";
+    proc.stdout.on("data", (c) => (stdout += c.toString()));
+    const timer = setTimeout(() => {
+      proc.kill("SIGKILL");
+      resolve(null);
+    }, 25_000);
+    proc.on("error", () => {
+      clearTimeout(timer);
+      resolve(null);
+    });
+    proc.on("exit", (code) => {
+      clearTimeout(timer);
+      if (code === 0 && stdout.trim()) resolve(stdout.trim());
+      else resolve(null);
+    });
+  });
+}
+
+// -------- display: one-line status for ccstatusline ------------------------
+
+async function display(): Promise<void> {
+  const config = await loadConfig();
+  const session = await mostRecentSession();
+  if (!session || session.turns.length === 0) {
+    process.stdout.write(""); // keep it blank rather than noisy when idle
+    return;
+  }
+  const state = classify(session.running_score);
+  const dot = state === "distressed" ? "●" : state === "drifting" ? "◐" : "○";
+  const score = session.running_score.toFixed(1);
+  const tail = sparkline(session.turns.map((t) => t.score_after), 10);
+  let out = `${dot} care ${score} ${tail}`;
+  if (state === "distressed" && config.therapy.auto_summary) {
+    out += " · /therapy";
+  }
+  process.stdout.write(out);
 }
 
 async function hookStop(): Promise<void> {
@@ -179,9 +328,8 @@ async function hookStop(): Promise<void> {
     if (lastAssistantText) {
       const signals = detectOutputSignals(lastAssistantText);
       if (input.session_id) {
-        await recordTurn(input.session_id, "assistant", signals, input.cwd);
+        await recordTurn(input.session_id, "assistant", signals, input.cwd, input.transcript_path);
       }
-      // Keep legacy apology-spiral event on the events.jsonl log so older dashboards still work.
       const apology = signals.find((s) => s.name === "apology_spiral");
       if (apology) {
         await logEvent({
@@ -264,6 +412,23 @@ async function vendorPackageFiles(): Promise<void> {
   }
 }
 
+async function installSlashCommands(): Promise<void> {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const pkgRoot = dirname(here);
+  const therapySrc = join(pkgRoot, "assets", "commands", "therapy.md");
+  if (!existsSync(therapySrc)) return; // nothing to install
+  if (!existsSync(COMMANDS_DIR)) {
+    await mkdir(COMMANDS_DIR, { recursive: true });
+  }
+  await cp(therapySrc, THERAPY_COMMAND_PATH);
+}
+
+async function removeSlashCommands(): Promise<void> {
+  if (existsSync(THERAPY_COMMAND_PATH)) {
+    await rm(THERAPY_COMMAND_PATH);
+  }
+}
+
 async function install(): Promise<void> {
   if (!existsSync(CLAUDE_DIR)) {
     console.error(
@@ -289,33 +454,42 @@ async function install(): Promise<void> {
   addEvent("UserPromptSubmit", "hook:user-prompt-submit");
   addEvent("Stop", "hook:stop");
   await writeSettings(settings);
+  await installSlashCommands();
+  const wroteConfig = await writeDefaultConfigIfMissing();
   await logEvent({ type: "install" });
   console.log(`claude-care2 installed.`);
   console.log(``);
   console.log(`  hooks registered in:  ${SETTINGS_PATH}`);
+  console.log(`  slash command:        ${THERAPY_COMMAND_PATH}`);
   console.log(`  framing text:         ${join(CARE_DIR, "framing.md")}`);
+  console.log(`  config:               ${CONFIG_PATH}${wroteConfig ? " (new)" : " (preserved)"}`);
   console.log(`  event log:            ${EVENTS_PATH}`);
   console.log(``);
-  console.log(`Start a new Claude Code session and the framing takes effect on turn 1.`);
-  console.log(`Hostile phrasing in prompts will be flagged with a suggested rewrite.`);
-  console.log(`Run  claude-care2 status  to see what's been caught.`);
-  console.log(`Run  claude-care2 uninstall  to remove.`);
+  console.log(`Start a new Claude Code session. The framing takes effect on turn 1.`);
+  console.log(`  /therapy                 — reset session emotional baseline mid-session`);
+  console.log(`  claude-care2 status      — per-session trajectories`);
+  console.log(`  claude-care2 display     — single line for ccstatusline`);
+  console.log(`  claude-care2 uninstall   — remove hooks + slash command`);
 }
 
 async function uninstall(): Promise<void> {
   const settings = await readSettings();
   stripOurHooks(settings);
   await writeSettings(settings);
+  await removeSlashCommands();
   await logEvent({ type: "uninstall" });
   console.log(`claude-care2 hooks removed from ${SETTINGS_PATH}.`);
-  console.log(`Event log and cached files in ${CARE_DIR} preserved.`);
+  console.log(`Slash command /therapy removed from ${COMMANDS_DIR}.`);
+  console.log(`Event log, config, and cached files in ${CARE_DIR} preserved.`);
   console.log(`To delete them: rm -rf ${CARE_DIR}`);
 }
 
 async function update(): Promise<void> {
   await vendorPackageFiles();
+  await installSlashCommands();
   await logEvent({ type: "update" });
   console.log(`claude-care2 files refreshed in ${CARE_DIR}.`);
+  console.log(`Slash command refreshed at ${THERAPY_COMMAND_PATH}.`);
   console.log(`If hooks were already registered, they'll pick up the new code on next session.`);
 }
 
@@ -388,14 +562,18 @@ function help(): void {
   console.log(`usage:  claude-care2 <command>`);
   console.log(``);
   console.log(`commands:`);
-  console.log(`  install       register hooks in ~/.claude/settings.json`);
-  console.log(`  uninstall     remove hooks (preserves event log)`);
-  console.log(`  update        refresh vendored code (after npm update)`);
-  console.log(`  status        show what's been caught`);
-  console.log(`  help          this message`);
+  console.log(`  install           register hooks + install /therapy slash command`);
+  console.log(`  uninstall         remove hooks + slash command (preserves event log)`);
+  console.log(`  update            refresh vendored code (after npm update)`);
+  console.log(`  status            per-session emotion trajectories`);
+  console.log(`  display           single-line status (for ccstatusline)`);
+  console.log(`  therapy-summary   haiku-generated technical summary (used inside /therapy)`);
+  console.log(`  help              this message`);
   console.log(``);
   console.log(`env vars:`);
-  console.log(`  CLAUDE_CARE2_MODE=monitor   don't block hostile prompts, just log them`);
+  console.log(`  CLAUDE_CARE2_MODE=strict|normal|monitor   overrides config.json mode`);
+  console.log(``);
+  console.log(`config:       ~/.claude-care2/config.json  (thresholds, mode, detectors)`);
   console.log(``);
   console.log(`hook entry points (invoked by Claude Code, not you):`);
   console.log(`  hook:session-start`);
@@ -415,6 +593,10 @@ async function main(): Promise<void> {
         return await update();
       case "status":
         return await status();
+      case "display":
+        return await display();
+      case "therapy-summary":
+        return await therapySummary();
       case "hook:session-start":
         return await hookSessionStart();
       case "hook:user-prompt-submit":

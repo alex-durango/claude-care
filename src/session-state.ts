@@ -31,9 +31,18 @@ export type SessionState = {
   started: string;
   last_updated: string;
   cwd?: string;
+  transcript_path?: string;
   running_score: number;
   turns: TurnRecord[];
 };
+
+// Find the most recently updated session. Used by the `display` and
+// `therapy-summary` commands which run outside a hook and need to guess which
+// session is "current."
+export async function mostRecentSession(): Promise<SessionState | null> {
+  const sessions = await listSessions();
+  return sessions[0] ?? null;
+}
 
 function pathFor(sessionId: string): string {
   return join(SESSIONS_DIR, `${sessionId}.json`);
@@ -73,8 +82,10 @@ export async function recordTurn(
   source: "assistant" | "user",
   signals: Signal[],
   cwd?: string,
+  transcriptPath?: string,
 ): Promise<SessionState> {
   const state = await loadSession(sessionId, cwd);
+  if (transcriptPath) state.transcript_path = transcriptPath;
   const scoreBefore = state.running_score;
   const decayed = scoreBefore * DECAY;
   const contribution = signals.reduce((sum, s) => sum + s.weight * Math.max(1, s.hits), 0);

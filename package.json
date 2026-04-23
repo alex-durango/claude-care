@@ -16,6 +16,7 @@
   },
   "files": [
     "dist",
+    "assets",
     "framing.md",
     "README.md",
     "LICENSE"

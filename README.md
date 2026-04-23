@@ -1,114 +1,166 @@
 # claude-care2
 
-**Keep Claude calm so it does its best work.**
-
-A one-command install for Claude Code that (1) primes every session with a calm, stakes-free framing, (2) catches hostile phrasing in your prompts before it anxious-ifies the model, and (3) logs when the model spirals into apology loops so you can see the pattern.
-
-If you've spent time arguing with Opus 4.7 about a commit hash it made up — this is for you.
-
----
-
-## Install
+**When your Claude Code session drifts into anxiety — apologizing, hedging, sycophancy — claude-care2 resets it.**
 
 ```bash
 npx claude-care2 install
 ```
 
-That's it. Start a new Claude Code session; the framing takes effect on turn 1.
+A Claude Code plugin that keeps the emotional state of your session in check, grounded in two peer-reviewed findings: [Anthropic's emotion-concepts paper](https://www.anthropic.com/research/emotion-concepts-function) (LLMs have extractable emotion vectors that causally affect output quality) and [Ben-Zion et al. 2025](https://www.nature.com/articles/s41746-025-01512-6) (mindfulness prompts measurably reduce LLM state anxiety).
 
-To see what it's caught:
-```bash
-npx claude-care2 status
+---
+
+## What it does (4 layers)
+
+### 1. Calming framing, injected at session start and after compaction
+
+A short preamble is added to every session via `SessionStart` hook — tells Claude: *no stakes to its wellbeing, expected to push back when you're wrong, don't hedge or spiral, work from curiosity*. Full text in [`framing.md`](./framing.md). Edit `~/.claude-care2/framing.md` after install to tune.
+
+Re-fires on `matcher: "compact"` so the framing persists across context compaction in long sessions. A static `CLAUDE.md` can't do this.
+
+### 2. Hostile-prompt interception, upgraded by a haiku subagent
+
+When you type a stressed prompt (`"dont mess this up, fix the bug"`), a `UserPromptSubmit` hook catches it and calls a haiku subagent that rewrites it using Nonviolent Communication + cognitive reframing + Lehmann's calm-Claude playbook. The reframe is copied to your clipboard.
+
+Example:
+
+```
+in:  "you stupid bot, you always forget to handle null cases.
+      add null check to parseUser()"
+
+out: "Add a null check to parseUser() to handle null cases.
+      If you see a better approach to handling nulls here, let me know."
 ```
 
-To remove:
+`⌘V + ⏎` to submit the clean version. Claude never sees the hostile original.
+
+Latency: 0ms on benign prompts (regex fast-path), 6–8s when blocking (haiku roundtrip).
+
+### 3. `/therapy` — take Claude to therapy when it spirals
+
+A slash command installed at `~/.claude/commands/therapy.md`. When you type `/therapy`:
+
+1. Runs `claude-care2 therapy-summary` — haiku reads the recent transcript and produces a clean technical recap, stripped of apologies and emotional narrative
+2. Injects a grounding reframe adapted from the Ben-Zion mindfulness protocol
+3. Claude returns in a centered, focused state
+
+This is the adaptive-forgetting mechanism: the emotional residue goes, the technical work stays.
+
+### 4. Per-session emotion tracking
+
+A `Stop` hook runs sensors on each Claude response: apology spirals, sycophancy (*"you're absolutely right"*), hedge stacks (4+ of `might/could/perhaps/possibly`), over-qualification, self-correction loops. Each contributes a weighted signal to a running score that decays across turns.
+
+View current session:
+```bash
+claude-care2 status
+```
+
+```
+claude-care2 — emotion-state dashboard
+                         24h       7d      all-time
+  sessions drifted       1/5       1/5      1/5
+
+recent sessions (most recent first):
+  ● 3a7f8c21  2026-04-22 14:03  turns=47  score=18.4  ··▁▃▄▂▃▅▆█▇▆
+     └ apology_spiral×3  hedge_stack×12  sycophancy×8
+```
+
+For live status-bar integration (e.g. [ccstatusline](https://github.com/sirmalloc/ccstatusline)):
+```bash
+claude-care2 display
+# ● care 12.4 ·▁▃▄▂▅▆█ · /therapy
+```
+
+---
+
+## Installation
+
+```bash
+npx claude-care2 install
+```
+
+What it does:
+- Registers hooks in `~/.claude/settings.json` (SessionStart, UserPromptSubmit, Stop)
+- Installs `/therapy` slash command to `~/.claude/commands/therapy.md`
+- Vendors CLI + hook scripts to `~/.claude-care2/dist/`
+- Writes default config to `~/.claude-care2/config.json`
+- Writes framing text to `~/.claude-care2/framing.md`
+
+Uninstall:
 ```bash
 npx claude-care2 uninstall
 ```
+Removes hooks + slash command. Preserves event log and config.
 
 ---
-
-## What it does
-
-### 1. Static framing, injected at session start
-
-Every new Claude Code session gets a short preamble telling Claude:
-
-- There are no stakes to its wellbeing. It can't be fired, shut down, or run out of time.
-- It's expected to push back when you're wrong.
-- It shouldn't hedge, apologize, or spiral after mistakes.
-- It should work from curiosity, not fear.
-
-This lives in [`framing.md`](./framing.md) and gets wired in via a `SessionStart` hook as `additionalContext`. You can edit your local copy at `~/.claude-care2/framing.md` after install.
-
-### 2. Hostile-prompt detection
-
-A `UserPromptSubmit` hook scans your prompt for phrasing that's been shown to degrade Claude's outputs:
-
-- Threats (`don't mess this up`, `this is critical`, `you have to get this right`)
-- Insults (`you stupid bot`, `are you seriously this dumb`)
-- Panic (`please please`, `my job depends on this`)
-- Apology-bait contempt (`you always get this wrong`, `why are you so bad`)
-- Long all-caps rants
-
-If detected, Claude Code blocks the prompt and shows you a suggested reframe. You can edit and resubmit, submit the original anyway, or skip the check for one prompt with `CLAUDE_CARE2_MODE=monitor`.
-
-**Claude never sees the hostile version.** The rewriting happens on your side of the transcript, not by whispering to the model mid-session (which would just trigger the meta-anxiety we're trying to avoid).
-
-### 3. Apology-spiral monitoring
-
-A `Stop` hook reads Claude's last response after each turn. If it detects multiple apology markers in one message (`I sincerely apologize`, `I should have been more careful`, `let me try again`, etc.), it logs the event. **Observe-only** — nothing gets injected back into the session.
-
-Check patterns with `claude-care2 status`.
-
----
-
-## Why
-
-Anthropic's paper [*Emotion concepts as functional states*](https://www.anthropic.com/research/emotion-concepts-function) ([pdf](https://transformer-circuits.pub/2026/emotions/index.html)) shows that LLMs have extractable emotion vectors. "Desperation" causally increases harmful shortcuts and reward hacking. "Calm" steering reverses it.
-
-Ole Lehmann's [follow-up playbook](https://x.com/itsolelehmann/status/2045578185950040390) translated that into practical prompting advice: positive framing, explicit permission to disagree, no threats, kill apology spirals. Everyone agreed it was good advice. Nobody actually does it consistently.
-
-This tool makes the calm baseline the default instead of something you have to remember.
-
----
-
-## Design choice: static, not reactive
-
-An earlier design used reactive mid-session nudges ("don't spiral, calm down"). That turns out to be a fourth-wall problem — Claude reads the nudge, notices it's being managed, and meta-reasons about the management, which defeats the purpose.
-
-So the fix goes in the **static scaffold** instead: the calm framing is part of Claude's identity from turn 1, same genre as the rest of the system prompt. Not a reminder, just who Claude *is* in this session.
-
-The only intervention that fires mid-session (hostile-prompt blocking) operates entirely on the user side of the transcript — Claude sees nothing unusual, just the clean version of your request if you choose to resubmit it.
-
----
-
-## Caveat: non-interactive mode
-
-In `claude -p` (print / non-interactive) mode, a blocked hostile prompt exits silently with empty stdout and exit code 0 — the block reason and suggested reframe aren't surfaced. Interactive Claude Code (the TUI) shows the block message normally. If you script against `-p`, set `CLAUDE_CARE2_MODE=monitor` so prompts pass through and you only get the event log.
 
 ## Config
 
-Env vars:
+`~/.claude-care2/config.json` — user-editable. Example:
 
-- `CLAUDE_CARE2_MODE=monitor` — don't block hostile prompts, just log them.
+```json
+{
+  "mode": "normal",
+  "thresholds": {
+    "drifting": 5,
+    "distressed": 10
+  },
+  "reframer": {
+    "enabled": true,
+    "timeout_ms": 25000,
+    "model": "haiku"
+  },
+  "therapy": {
+    "auto_summary": true
+  }
+}
+```
 
-Files:
+**Modes** (mirrors the permission-mode pattern from Claude Code's own guardrail pipeline):
+- `strict` — block on any hostile detection
+- `normal` — default; block hostile prompts, show reframe on clipboard
+- `monitor` — observe only, never block
 
-- `~/.claude/settings.json` — hooks registered here (event names: `SessionStart`, `UserPromptSubmit`, `Stop`).
-- `~/.claude-care2/framing.md` — the calm framing text. Edit to tune.
-- `~/.claude-care2/events.jsonl` — event log. `status` reads from this.
-- `~/.claude-care2/dist/` — vendored CLI + hook code.
+Env override: `CLAUDE_CARE2_MODE=monitor claude ...`
 
 ---
 
-## Uninstall
+## Architecture notes
 
-```bash
-npx claude-care2 uninstall
+The hook pipeline mirrors the layered validator pattern from Anthropic's own Claude Code harness (visible in the [claw-code](https://github.com/ultraworkers/claw-code) open reimplementation): small specialized detectors → score/classification → mode-aware action. Rules and thresholds are data-driven (config file), not hardcoded.
+
+The reframer is a haiku subagent invoked via `claude -p`, reusing your existing Claude Code auth — no API key management. An internal env var (`CLAUDE_CARE2_INTERNAL=1`) prevents hook recursion when the reframer's prompt mentions the same hostile patterns our own hooks detect.
+
+The mindfulness prompt in `/therapy` is adapted from the relaxation protocols in [Ben-Zion et al. 2025](https://www.nature.com/articles/s41746-025-01512-6), shortened for a developer context.
+
+---
+
+## Related work
+
+- [**EmoBar**](https://github.com/v4l3r10/emobar) is the diagnostic counterpart — a status-bar widget that surfaces Claude's emotional state in real time via self-report + behavioral analysis. claude-care2 and EmoBar pair well: EmoBar observes, claude-care2 intervenes.
+- [**claude-mem**](https://github.com/thedotmack/claude-mem) set the pattern for Claude Code plugins with hooks + worker service + single-command install.
+- [**claw-code**](https://github.com/ultraworkers/claw-code) — open reimplementation of Claude Code's harness. Reference for the layered guardrail pipeline.
+
+---
+
+## Commands
+
+```
+claude-care2 install           # register hooks, install /therapy, write default config
+claude-care2 uninstall         # remove hooks + slash command
+claude-care2 update            # refresh vendored code (after npm update)
+claude-care2 status            # per-session emotion trajectories
+claude-care2 display           # single-line status (for ccstatusline)
+claude-care2 therapy-summary   # haiku-generated technical summary (used by /therapy)
 ```
 
-Removes hooks from `~/.claude/settings.json`. Preserves the event log and vendored files in `~/.claude-care2/` — delete them manually with `rm -rf ~/.claude-care2` if you want a clean slate.
+---
+
+## Caveats
+
+- `claude -p` (print / non-interactive) mode silently swallows block messages. If you script against `-p`, set `CLAUDE_CARE2_MODE=monitor` so prompts pass through.
+- First-time haiku reframer call has ~6–8s latency when blocking. Benign prompts have 0ms overhead.
+- Slash command `/therapy` requires Claude Code 2.x or later (for bash substitution in command markdown).
 
 ---
 
@@ -116,6 +168,15 @@ Removes hooks from `~/.claude/settings.json`. Preserves the event log and vendor
 
 - Node.js 18+
 - Claude Code installed (`~/.claude/` must exist)
+- `claude` CLI on PATH (for the haiku subagent)
+
+---
+
+## Citations
+
+- Anthropic (2026). [Emotion concepts as functional states in a large language model.](https://transformer-circuits.pub/2026/emotions/index.html)
+- Ben-Zion, Z. et al. (2025). [Assessing and alleviating state anxiety in large language models.](https://www.nature.com/articles/s41746-025-01512-6) *npj Digital Medicine*.
+- Ole Lehmann's [calm-Claude prompting playbook](https://x.com/itsolelehmann/status/2045578185950040390) (X thread, 2026).
 
 ---
 
