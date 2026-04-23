@@ -17,6 +17,7 @@ import {
 } from "./session-state.js";
 import { reframeWithHaiku } from "./reframe.js";
 import { copyToClipboard } from "./clipboard.js";
+import { autotype } from "./autotype.js";
 import {
   loadConfig,
   writeDefaultConfigIfMissing,
@@ -139,7 +140,10 @@ async function hookUserPromptSubmit(): Promise<void> {
   const result = await reframeWithHaiku(prompt, detection.suggestion);
   const reframe = result.reframed;
 
-  // Write to clipboard so user's next paste is the clean version.
+  // Try to auto-type the reframe into the focused app. On macOS this types it
+  // directly into Claude Code's input box (after a short delay so the block
+  // message renders first). Clipboard is the fallback + backup.
+  const typed = autotype(reframe);
   const clipboardTool = await copyToClipboard(reframe);
 
   await logEvent({
@@ -152,18 +156,23 @@ async function hookUserPromptSubmit(): Promise<void> {
       reframe_ms: result.ms,
       reframe_length: reframe.length,
       clipboard: clipboardTool ?? "unavailable",
+      autotype: typed.backend,
     },
   });
 
-  const clipboardLine = clipboardTool
-    ? `⌘V + ⏎ to use the reframe. Or edit your original and resubmit.`
-    : `(couldn't reach clipboard — copy the reframe manually.)`;
+  let actionLine: string;
+  if (typed.attempted) {
+    actionLine = `Reframe is being typed into your input — just press ⏎. (Fallback: ⌘V for clipboard.)`;
+  } else if (clipboardTool) {
+    actionLine = `⌘V + ⏎ to use the reframe. Or edit your original and resubmit.`;
+  } else {
+    actionLine = `(couldn't reach clipboard — copy the reframe manually.)`;
+  }
 
   const reason =
-    `[claude-care2] tension detected (${detection.markers.join(", ")}) — ` +
-    `reframe ready${clipboardTool ? " on your clipboard" : ""}:\n\n` +
+    `[claude-care2] tension detected (${detection.markers.join(", ")}):\n\n` +
     `  ${reframe}\n\n` +
-    `${clipboardLine}\n` +
+    `${actionLine}\n` +
     `Mode: ${mode}  ·  disable per-prompt: CLAUDE_CARE2_MODE=monitor  ·  uninstall: claude-care2 uninstall`;
   const output = { decision: "block", reason };
   process.stdout.write(JSON.stringify(output));
