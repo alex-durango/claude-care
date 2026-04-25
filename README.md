@@ -107,7 +107,7 @@ What it does:
 - Writes default config to `~/.claude-care/config.json`
 - Writes framing text to `~/.claude-care/framing.md`
 
-> Note: `npx -y claude-care install` is the recommended setup path. It configures Claude Code and vendors the hook runner, but it does not add a permanent `claude-care` binary to your shell `PATH`, so `which claude-care` may show nothing. Use `npx -y claude-care <command>` for follow-up commands, or optionally run `npm install -g claude-care` if you want a persistent CLI.
+> Note: `npx -y claude-care install` is the recommended setup path. It configures Claude Code and vendors the hook runner, but it does not add a permanent shell command to your `PATH`. Use `npx -y claude-care <command>` for follow-up commands, or optionally run `npm install -g claude-care` if you want a persistent CLI.
 
 Uninstall:
 ```bash
