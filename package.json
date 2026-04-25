@@ -1,6 +1,6 @@
 {
   "name": "claude-care",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "description": "Keep Claude calm so it does its best work. Static framing + prompt monitoring for Claude Code.",
   "bin": {
     "claude-care": "dist/cli.js"
