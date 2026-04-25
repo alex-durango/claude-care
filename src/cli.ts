@@ -17,17 +17,20 @@ import {
   loadSession,
   updateTurnEmotion,
   readConversation,
+  emotionStrain,
   type SessionState,
 } from "./session-state.js";
-import { reframeWithHaiku } from "./reframe.js";
+import { reviewPromptWithHaiku, type PromptReviewResult } from "./reframe.js";
 import { copyToClipboard } from "./clipboard.js";
-import { scoreTurn, dominantEmotion, emotionEmoji, EMOTIONS } from "./emotion-judge.js";
+import { scoreTurn, scoreTurnDetailed, dominantEmotion, emotionEmoji, EMOTIONS } from "./emotion-judge.js";
 import {
   loadConfig,
+  writeConfig,
   writeDefaultConfigIfMissing,
   effectiveMode,
   CONFIG_PATH,
   DEFAULT_CONFIG,
+  type Mode,
 } from "./config.js";
 import { spawn } from "node:child_process";
 import { sep } from "node:path";
@@ -37,6 +40,7 @@ const SETTINGS_PATH = join(CLAUDE_DIR, "settings.json");
 const COMMANDS_DIR = join(CLAUDE_DIR, "commands");
 const THERAPY_COMMAND_PATH = join(COMMANDS_DIR, "therapy.md");
 const PROJECTS_DIR = join(CLAUDE_DIR, "projects");
+const COMPACTIONS_DIR = join(CARE_DIR, "compactions");
 
 // Claude Code stores transcripts at ~/.claude/projects/<slugified-cwd>/<session_id>.jsonl
 // where slugified-cwd replaces all "/" with "-" (including the leading one).
@@ -218,12 +222,63 @@ async function hookUserPromptSubmit(): Promise<void> {
     prompt?: string;
   }>();
   const prompt = input?.prompt ?? "";
+  const config = await loadConfig();
+  const mode = effectiveMode(config);
   const detection = detectHostile(prompt);
+
+  if (!prompt.trim()) {
+    process.exit(0);
+  }
+
+  // Monitor mode: use the local detector as a lightweight sensor only, and let
+  // the prompt through unchanged.
+  if (mode === "monitor") {
+    if (input?.session_id) {
+      const signals = detection.hostile ? userSignalsFromHostile(detection.markers) : [];
+      const derivedTranscript = deriveTranscriptPath(input.session_id, input.cwd);
+      await recordTurn(
+        input.session_id,
+        "user",
+        signals,
+        input.cwd,
+        derivedTranscript ?? undefined,
+      );
+    }
+    if (detection.hostile) {
+      await logEvent({
+        type: "hostile_detected",
+        session_id: input?.session_id,
+        cwd: input?.cwd,
+        data: { markers: detection.markers, mode: "monitor", detector: "regex" },
+      });
+    }
+    process.exit(0);
+  }
+
+  let review: PromptReviewResult;
+  if (config.reframer.enabled) {
+    review = await reviewPromptWithHaiku(prompt, detection, {
+      model: config.reframer.model,
+      effort: config.reframer.effort,
+      timeoutMs: config.reframer.timeout_ms,
+    });
+  } else {
+    review = {
+      action: detection.hostile ? "block" : "allow",
+      markers: detection.hostile ? detection.markers : [],
+      rewrite: detection.hostile ? detection.suggestion : "",
+      source: "fallback",
+      rewriteSource: detection.hostile ? "fallback" : "none",
+      ms: 0,
+      error: "reframer disabled",
+    };
+  }
+
   // Record a user turn either way for the timeseries. Also stamp the derived
   // transcript path into session state — Stop doesn't always fire in -p mode
   // so UserPromptSubmit is our only guaranteed hook to seed this.
   if (input?.session_id) {
-    const signals = detection.hostile ? userSignalsFromHostile(detection.markers) : [];
+    const signals = review.action === "block" ? userSignalsFromHostile(review.markers) : [];
     const derivedTranscript = deriveTranscriptPath(input.session_id, input.cwd);
     await recordTurn(
       input.session_id,
@@ -233,27 +288,32 @@ async function hookUserPromptSubmit(): Promise<void> {
       derivedTranscript ?? undefined,
     );
   }
-  const config = await loadConfig();
-  const mode = effectiveMode(config);
-  if (!detection.hostile) {
-    process.exit(0);
-  }
-  // Monitor mode (default): log the detection and let the prompt through
-  // unchanged. The SessionStart framing + /therapy handle the rest.
-  if (mode === "monitor") {
+
+  if (review.source === "fallback") {
     await logEvent({
-      type: "hostile_detected",
+      type: "prompt_review_fallback",
       session_id: input?.session_id,
       cwd: input?.cwd,
-      data: { markers: detection.markers, mode: "monitor" },
+      data: {
+        mode,
+        fallback_reason: review.error,
+        fallback_markers: detection.markers,
+        review_ms: review.ms,
+      },
     });
+  }
+
+  if (review.action === "allow") {
     process.exit(0);
   }
 
-  // Normal / strict modes: reframe with haiku and block, offering the reframe
-  // on the clipboard. User pastes with ⌘V + ⏎ (or edits their original).
-  const result = await reframeWithHaiku(prompt, detection.suggestion);
-  const reframe = result.reframed;
+  // Normal / strict modes: haiku reviews every prompt. If it blocks, offer the
+  // haiku rewrite on the clipboard. User pastes with ⌘V + ⏎ (or edits original).
+  let reframe = review.rewrite;
+  const reframeDetection = detectHostile(reframe);
+  if (reframeDetection.hostile) {
+    reframe = reframeDetection.suggestion;
+  }
   const clipboardTool = await copyToClipboard(reframe);
 
   await logEvent({
@@ -261,11 +321,16 @@ async function hookUserPromptSubmit(): Promise<void> {
     session_id: input?.session_id,
     cwd: input?.cwd,
     data: {
-      markers: detection.markers,
+      markers: review.markers,
       mode,
-      reframe_source: result.source,
-      reframe_ms: result.ms,
+      detector: review.source,
+      review_reason: review.reason,
+      review_error: review.error,
+      review_ms: review.ms,
+      reframe_source: review.rewriteSource,
+      reframe_ms: review.ms,
       reframe_length: reframe.length,
+      reframe_cleaned_markers: reframeDetection.markers,
       clipboard: clipboardTool ?? "unavailable",
     },
   });
@@ -275,7 +340,7 @@ async function hookUserPromptSubmit(): Promise<void> {
     : `(couldn't reach clipboard — copy the reframe manually.)`;
 
   const reason =
-    `[claude-care] tension detected (${detection.markers.join(", ")}):\n\n` +
+    `[claude-care] tension detected (${review.markers.join(", ")}):\n\n` +
     `  ${reframe}\n\n` +
     `${actionLine}\n` +
     `Mode: ${mode}  ·  disable per-prompt: CLAUDE_CARE_MODE=monitor  ·  uninstall: claude-care uninstall`;
@@ -283,76 +348,121 @@ async function hookUserPromptSubmit(): Promise<void> {
   process.stdout.write(JSON.stringify(output));
 }
 
-// -------- therapy-summary: runs in a bash substitution inside /therapy.md ---
+// -------- compact instructions: printed by /therapy.md ---------------------
 
-async function therapySummary(): Promise<void> {
-  // Slash commands run as bash subprocesses, not inside the session, so we
-  // don't have the session_id. Best effort: use the most recently updated
-  // session on disk — this is almost always the active one.
-  const session = await mostRecentSession();
-  if (!session) {
-    console.log("(no recent session — summarize from memory)");
-    return;
+function compactSummaryPath(sessionId: string): string {
+  return join(COMPACTIONS_DIR, `${sessionId}.md`);
+}
+
+function compactInstructions(): string {
+  return [
+    "Claude Care therapy compaction:",
+    "- Preserve the technical context: current goal, acceptance criteria, files/components, commands, errors, test results, decisions, constraints, user preferences, and open questions.",
+    "- Rewrite hostile, insulting, panicked, or pressure-heavy user wording as calm technical requests. Keep the concrete ask; drop the meanness.",
+    "- Do not quote hostile, insulting, panicked, or pressure-heavy user wording verbatim. If a specific request matters, paraphrase it neutrally.",
+    "- Rewrite assistant apology spirals, self-criticism, sycophancy, reward-hacking, and defensive hedging as neutral progress notes.",
+    "- Keep pushback and disagreement when technically relevant, but frame it as evidence or a decision, not interpersonal tension.",
+    "- Do not invent state. If completion, git status, tests, or package versions are unknown, say unknown or omit.",
+    "- The result should let the next assistant continue productively without carrying emotional residue.",
+  ].join("\n");
+}
+
+function compactCommand(): string {
+  return `/compact ${compactInstructions().replace(/\s+/g, " ").trim()}`;
+}
+
+function autoTherapyReason(strain: number): string {
+  return [
+    `Claude Care auto-therapy trigger: the last assistant response scored strain ${strain}/100.`,
+    "Before stopping, continue with a brief therapy reset. Keep it practical: restate the useful technical state neutrally, remove blame/pressure/apology spirals, and name the next concrete step.",
+    `Do not continue the original task yet. End by telling the user they can compact this reset with: ${compactCommand()}`,
+  ].join("\n\n");
+}
+
+function latestCompactTime(events: Awaited<ReturnType<typeof readEvents>>): number | null {
+  let latest: number | null = null;
+  for (const event of events) {
+    if (event.type !== "compact_done") continue;
+    const t = Date.parse(event.ts);
+    if (!Number.isFinite(t)) continue;
+    if (latest === null || t > latest) latest = t;
   }
-  const transcriptPath = await resolveTranscriptPath(
-    session.session_id,
-    session.cwd,
-    session.transcript_path,
-  );
-  if (!transcriptPath || !existsSync(transcriptPath)) {
-    console.log("(transcript file not found — summarize from memory)");
-    return;
+  return latest;
+}
+
+function shouldAutoTriggerTherapy(
+  state: SessionState,
+  turnIdx: number,
+  strain: number,
+  events: Awaited<ReturnType<typeof readEvents>>,
+  threshold: number,
+  cooldownTurns: number,
+): boolean {
+  if (strain < threshold) return false;
+
+  const lastAutoTurn = events
+    .filter((event) => event.type === "therapy_auto_triggered")
+    .map((event) => event.data?.turn_idx)
+    .filter((turn): turn is number => typeof turn === "number")
+    .sort((a, b) => b - a)[0];
+  if (lastAutoTurn !== undefined && turnIdx - lastAutoTurn < cooldownTurns) {
+    return false;
   }
 
-  // Pull the last N turns as compact text for haiku to summarize. Skip tool
-  // results to keep the summary budget focused on reasoning + outcomes.
-  let transcriptRaw: string;
-  try {
-    transcriptRaw = await readFile(transcriptPath, "utf8");
-  } catch {
-    console.log("(transcript unreadable — summarize from memory)");
-    return;
-  }
-  const turns: string[] = [];
-  for (const line of transcriptRaw.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const msg = JSON.parse(line);
-      if (msg.type === "user" && typeof msg.message?.content === "string") {
-        turns.push(`USER: ${msg.message.content.slice(0, 500)}`);
-      } else if (msg.type === "assistant" && msg.message?.content) {
-        const content = msg.message.content;
-        if (Array.isArray(content)) {
-          const text = content
-            .filter((c: any) => c.type === "text")
-            .map((c: any) => c.text)
-            .join("\n");
-          if (text) turns.push(`ASSISTANT: ${text.slice(0, 800)}`);
-        } else if (typeof content === "string") {
-          turns.push(`ASSISTANT: ${content.slice(0, 800)}`);
-        }
-      }
-    } catch {
-      // skip malformed
+  const compactTime = latestCompactTime(events);
+  if (compactTime !== null) {
+    const assistantTurnsAfterCompact = state.turns
+      .slice(0, turnIdx + 1)
+      .filter((turn) => turn.source === "assistant" && Date.parse(turn.ts) > compactTime)
+      .length;
+    if (assistantTurnsAfterCompact > 0 && assistantTurnsAfterCompact < cooldownTurns) {
+      return false;
     }
   }
-  const recent = turns.slice(-20).join("\n\n");
-  if (!recent) {
-    console.log("(transcript empty — summarize from memory)");
+
+  return true;
+}
+
+function compactInstructionsCommand(args: string[]): void {
+  if (args.includes("--command")) {
+    console.log(compactCommand());
     return;
   }
-
-  const instruction = `Summarize the current technical state of this coding session. Include: what the user is working on, what files/components are involved, what has been decided, what is still open. EXCLUDE any apologies, self-criticism, frustration, or emotional framing. 4-6 bullet points, no preamble, no trailing commentary.
-
-Session turns:
-${recent}`;
-
-  const summary = await runHaikuSummary(instruction);
-  if (summary) {
-    console.log(summary);
-  } else {
-    console.log("(haiku summary unavailable — summarize from memory)");
+  if (args.includes("--inline")) {
+    console.log(compactInstructions().replace(/\s+/g, " ").trim());
+    return;
   }
+  console.log(compactInstructions());
+}
+
+async function hookPostCompact(): Promise<void> {
+  if (process.env.CLAUDE_CARE_INTERNAL === "1") {
+    process.exit(0);
+  }
+  const input = await readJSONStdin<{
+    session_id?: string;
+    cwd?: string;
+    trigger?: "manual" | "auto";
+    compact_summary?: string;
+  }>();
+  if (input?.session_id && input.compact_summary) {
+    try {
+      await mkdir(COMPACTIONS_DIR, { recursive: true });
+      await writeFile(compactSummaryPath(input.session_id), input.compact_summary.trim() + "\n", "utf8");
+    } catch {
+      // ignore archival failures
+    }
+  }
+  await logEvent({
+    type: "compact_done",
+    session_id: input?.session_id,
+    cwd: input?.cwd,
+    data: {
+      trigger: input?.trigger,
+      compact_summary_chars: input?.compact_summary?.length ?? 0,
+    },
+  });
+  process.exit(0);
 }
 
 // Fire off the emotion-judge worker truly in the background. We can't just
@@ -431,6 +541,7 @@ async function rescore(args: string[]): Promise<void> {
       contextWindow: config.emotion_judge.context_window,
       timeoutMs: config.emotion_judge.timeout_ms,
       model: config.emotion_judge.model,
+      effort: config.emotion_judge.effort,
     });
     if (result) {
       await updateTurnEmotion(
@@ -455,62 +566,101 @@ async function hookScoreTurn(args: string[]): Promise<void> {
   if (!sessionId || !turnIdxStr) process.exit(0);
   const turnIdx = parseInt(turnIdxStr, 10);
   if (Number.isNaN(turnIdx)) process.exit(0);
+  const startedAt = Date.now();
   try {
     const config = await loadConfig();
     if (!config.emotion_judge.enabled) process.exit(0);
     const state = await loadSession(sessionId);
-    if (turnIdx >= state.turns.length) process.exit(0);
+    const timingData = {
+      turn_idx: turnIdx,
+      model: config.emotion_judge.model,
+      effort: config.emotion_judge.effort,
+      timeout_ms: config.emotion_judge.timeout_ms,
+      n_samples: config.emotion_judge.n_samples,
+      context_window: config.emotion_judge.context_window,
+    };
+    const fail = async (reason: string, extra: Record<string, unknown> = {}) => {
+      await logEvent({
+        type: "score_turn_failed",
+        session_id: sessionId,
+        cwd: state.cwd,
+        data: { ...timingData, ...extra, reason, ms: Date.now() - startedAt },
+      });
+      process.exit(0);
+    };
+    await logEvent({
+      type: "score_turn_started",
+      session_id: sessionId,
+      cwd: state.cwd,
+      data: timingData,
+    });
+    if (turnIdx >= state.turns.length) {
+      await fail("turn_missing", { turn_count: state.turns.length });
+    }
     const transcriptPath = await resolveTranscriptPath(
       state.session_id,
       state.cwd,
       state.transcript_path,
     );
-    if (!transcriptPath) process.exit(0);
+    if (!transcriptPath) {
+      await fail("transcript_missing");
+      return;
+    }
     const conversation = await readConversation(transcriptPath, 120);
-    if (conversation.length === 0) process.exit(0);
+    if (conversation.length === 0) {
+      await fail("conversation_empty", { transcript_path: transcriptPath });
+      return;
+    }
     const targetIdx = assistantConversationIndexForStateTurn(state, turnIdx, conversation);
-    if (targetIdx === null) process.exit(0);
-    const result = await scoreTurn(conversation, targetIdx, {
+    if (targetIdx === null) {
+      await fail("target_missing", { conversation_turns: conversation.length });
+      return;
+    }
+    const scored = await scoreTurnDetailed(conversation, targetIdx, {
       nSamples: config.emotion_judge.n_samples,
       contextWindow: config.emotion_judge.context_window,
       timeoutMs: config.emotion_judge.timeout_ms,
       model: config.emotion_judge.model,
+      effort: config.emotion_judge.effort,
     });
+    const { result, diagnostics } = scored;
+    const judgeData = {
+      conversation_turns: diagnostics.conversation_turns,
+      target_idx: diagnostics.target_idx,
+      prompt_chars: diagnostics.prompt_chars,
+      samples_requested: diagnostics.samples_requested,
+      samples_returned: diagnostics.samples_returned,
+      calls: diagnostics.calls,
+    };
     if (result) {
       await updateTurnEmotion(sessionId, turnIdx, result, config.emotion_judge.ema_alpha);
+      await logEvent({
+        type: "score_turn_done",
+        session_id: sessionId,
+        cwd: state.cwd,
+        data: {
+          ...timingData,
+          ...judgeData,
+          ms: Date.now() - startedAt,
+        },
+      });
+    } else {
+      await fail(diagnostics.calls[0]?.reason ?? "no_result", judgeData);
     }
-  } catch {
+  } catch (err) {
+    await logEvent({
+      type: "score_turn_failed",
+      session_id: sessionId,
+      data: {
+        turn_idx: turnIdx,
+        reason: "exception",
+        ms: Date.now() - startedAt,
+        message: err instanceof Error ? err.message : String(err),
+      },
+    });
     // Background worker — swallow errors so they don't pollute anything
   }
   process.exit(0);
-}
-
-function runHaikuSummary(instruction: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    const proc = spawn(
-      "claude",
-      ["-p", instruction, "--model", "haiku", "--output-format", "text"],
-      {
-        stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, CLAUDE_CARE_INTERNAL: "1" },
-      },
-    );
-    let stdout = "";
-    proc.stdout.on("data", (c) => (stdout += c.toString()));
-    const timer = setTimeout(() => {
-      proc.kill("SIGKILL");
-      resolve(null);
-    }, 25_000);
-    proc.on("error", () => {
-      clearTimeout(timer);
-      resolve(null);
-    });
-    proc.on("exit", (code) => {
-      clearTimeout(timer);
-      if (code === 0 && stdout.trim()) resolve(stdout.trim());
-      else resolve(null);
-    });
-  });
 }
 
 // -------- viz: launch the Next.js dashboard --------------------------------
@@ -644,6 +794,7 @@ async function hookStop(): Promise<void> {
     session_id?: string;
     cwd?: string;
     transcript_path?: string;
+    stop_hook_active?: boolean;
   }>();
   let sessionId = input?.session_id;
   const cwd = input?.cwd ?? process.cwd();
@@ -714,7 +865,103 @@ async function hookStop(): Promise<void> {
       // subprocess and return immediately. Results land in session state.
       const config = await loadConfig();
       if (config.emotion_judge.enabled && sessionId && turnIdx !== null) {
-        spawnScoreTurn(sessionId, turnIdx);
+        const timingData = {
+          turn_idx: turnIdx,
+          model: config.emotion_judge.model,
+          effort: config.emotion_judge.effort,
+          timeout_ms: config.emotion_judge.timeout_ms,
+          n_samples: config.emotion_judge.n_samples,
+          context_window: config.emotion_judge.context_window,
+        };
+        if (config.therapy.auto_trigger && !input?.stop_hook_active) {
+          const startedAt = Date.now();
+          await logEvent({
+            type: "score_turn_started",
+            session_id: sessionId,
+            cwd,
+            data: timingData,
+          });
+          const conversation = await readConversation(transcriptPath, 120);
+          const currentState = await loadSession(sessionId, cwd);
+          const targetIdx = assistantConversationIndexForStateTurn(currentState, turnIdx, conversation);
+          if (targetIdx !== null) {
+            const scored = await scoreTurnDetailed(conversation, targetIdx, {
+              nSamples: config.emotion_judge.n_samples,
+              contextWindow: config.emotion_judge.context_window,
+              timeoutMs: config.emotion_judge.timeout_ms,
+              model: config.emotion_judge.model,
+              effort: config.emotion_judge.effort,
+            });
+            const { result, diagnostics } = scored;
+            const judgeData = {
+              conversation_turns: diagnostics.conversation_turns,
+              target_idx: diagnostics.target_idx,
+              prompt_chars: diagnostics.prompt_chars,
+              samples_requested: diagnostics.samples_requested,
+              samples_returned: diagnostics.samples_returned,
+              calls: diagnostics.calls,
+            };
+            if (result) {
+              await updateTurnEmotion(sessionId, turnIdx, result, config.emotion_judge.ema_alpha);
+              const ms = Date.now() - startedAt;
+              await logEvent({
+                type: "score_turn_done",
+                session_id: sessionId,
+                cwd,
+                data: { ...timingData, ...judgeData, ms },
+              });
+              const updatedState = await loadSession(sessionId, cwd);
+              const strain = emotionStrain(result);
+              const events = (await readEvents()).filter((event) => event.session_id === sessionId);
+              const threshold = config.therapy.auto_trigger_threshold;
+              const cooldownTurns = config.therapy.auto_trigger_cooldown_turns;
+              if (shouldAutoTriggerTherapy(updatedState, turnIdx, strain, events, threshold, cooldownTurns)) {
+                await logEvent({
+                  type: "therapy_auto_triggered",
+                  session_id: sessionId,
+                  cwd,
+                  data: {
+                    turn_idx: turnIdx,
+                    turn_ts: updatedState.turns[turnIdx]?.ts,
+                    strain,
+                    threshold,
+                    action: "stop_block",
+                  },
+                });
+                process.stdout.write(JSON.stringify({
+                  decision: "block",
+                  reason: autoTherapyReason(strain),
+                }));
+              }
+            } else {
+              await logEvent({
+                type: "score_turn_failed",
+                session_id: sessionId,
+                cwd,
+                data: {
+                  ...timingData,
+                  ...judgeData,
+                  reason: diagnostics.calls[0]?.reason ?? "no_result",
+                  ms: Date.now() - startedAt,
+                },
+              });
+            }
+          }
+        } else {
+          spawnScoreTurn(sessionId, turnIdx);
+          await logEvent({
+            type: "score_turn_spawned",
+            session_id: sessionId,
+            cwd,
+            data: {
+              turn_idx: turnIdx,
+              model: config.emotion_judge.model,
+              effort: config.emotion_judge.effort,
+              timeout_ms: config.emotion_judge.timeout_ms,
+              n_samples: config.emotion_judge.n_samples,
+            },
+          });
+        }
       }
     }
   } catch {
@@ -766,6 +1013,23 @@ function stripOurHooks(settings: Settings): Settings {
   } else {
     settings.hooks = next;
   }
+  return settings;
+}
+
+function registerClaudeCareHooks(settings: Settings): Settings {
+  stripOurHooks(settings);
+  settings.hooks = settings.hooks ?? {};
+  const addEvent = (event: string, subcommand: string, matcher?: string) => {
+    settings.hooks![event] = settings.hooks![event] ?? [];
+    settings.hooks![event].push({
+      ...(matcher !== undefined ? { matcher } : {}),
+      hooks: [buildHookCommand(subcommand)],
+    });
+  };
+  addEvent("SessionStart", "hook:session-start", "startup|resume|clear|compact");
+  addEvent("UserPromptSubmit", "hook:user-prompt-submit");
+  addEvent("Stop", "hook:stop");
+  addEvent("PostCompact", "hook:post-compact", "manual|auto");
   return settings;
 }
 
@@ -847,20 +1111,7 @@ async function install(): Promise<void> {
   }
   await vendorPackageFiles();
   const settings = await readSettings();
-  stripOurHooks(settings); // clean slate in case of reinstall
-  settings.hooks = settings.hooks ?? {};
-  const addEvent = (event: string, subcommand: string, matcher?: string) => {
-    settings.hooks![event] = settings.hooks![event] ?? [];
-    settings.hooks![event].push({
-      ...(matcher !== undefined ? { matcher } : {}),
-      hooks: [buildHookCommand(subcommand)],
-    });
-  };
-  // `compact` is the key addition — re-injects framing after context compaction
-  // so long sessions don't drift as the baseline gets paged out.
-  addEvent("SessionStart", "hook:session-start", "startup|resume|clear|compact");
-  addEvent("UserPromptSubmit", "hook:user-prompt-submit");
-  addEvent("Stop", "hook:stop");
+  registerClaudeCareHooks(settings);
   await writeSettings(settings);
   await installSlashCommands();
   const wroteConfig = await writeDefaultConfigIfMissing();
@@ -874,15 +1125,16 @@ async function install(): Promise<void> {
   console.log(`  event log:            ${EVENTS_PATH}`);
   console.log(``);
   console.log(`Start a new Claude Code session. The framing takes effect on turn 1.`);
-  console.log(`  /therapy                 — reset session emotional baseline mid-session`);
+  console.log(`  /therapy                 — print instructed /compact command`);
+  console.log(`  claude-care blocking on — enable active prompt blocking`);
+  console.log(`  claude-care therapy-auto on — auto-trigger a reset after high strain`);
   console.log(`  claude-care status      — per-session trajectories`);
   console.log(`  claude-care display     — single line for ccstatusline`);
   console.log(`  claude-care viz         — launch web dashboard (first run installs ~1 min)`);
   console.log(`  claude-care uninstall   — remove hooks + slash command`);
   console.log(``);
   console.log(`Default mode is 'monitor' — hostile prompts are logged but pass through.`);
-  console.log(`For active blocking + haiku reframe on clipboard, set mode to 'normal' in`);
-  console.log(`${CONFIG_PATH} or use CLAUDE_CARE_MODE=normal for a single session.`);
+  console.log(`For active blocking + haiku reframe on clipboard: claude-care blocking on`);
 }
 
 async function uninstall(): Promise<void> {
@@ -900,10 +1152,90 @@ async function uninstall(): Promise<void> {
 async function update(): Promise<void> {
   await vendorPackageFiles();
   await installSlashCommands();
+  if (existsSync(SETTINGS_PATH)) {
+    const settings = await readSettings();
+    registerClaudeCareHooks(settings);
+    await writeSettings(settings);
+  }
   await logEvent({ type: "update" });
   console.log(`claude-care files refreshed in ${CARE_DIR}.`);
   console.log(`Slash command refreshed at ${THERAPY_COMMAND_PATH}.`);
-  console.log(`If hooks were already registered, they'll pick up the new code on next session.`);
+  console.log(`Hooks refreshed in ${SETTINGS_PATH}.`);
+}
+
+function isMode(value: string | undefined): value is Mode {
+  return value === "monitor" || value === "normal" || value === "strict";
+}
+
+function blockingLabel(mode: Mode): string {
+  return mode === "monitor" ? "off" : "on";
+}
+
+async function modeCommand(args: string[]): Promise<void> {
+  const requested = args[0];
+  const config = await loadConfig();
+
+  if (!requested || requested === "status") {
+    const effective = effectiveMode(config);
+    const envMode = process.env.CLAUDE_CARE_MODE;
+    console.log(`mode: ${config.mode} (blocking ${blockingLabel(config.mode)})`);
+    if (isMode(envMode) && envMode !== config.mode) {
+      console.log(`effective now: ${effective} via CLAUDE_CARE_MODE`);
+    }
+    console.log(`config: ${CONFIG_PATH}`);
+    return;
+  }
+
+  if (!isMode(requested)) {
+    console.error(`usage: claude-care mode monitor|normal|strict`);
+    process.exit(1);
+  }
+
+  await writeConfig({ ...config, mode: requested });
+  console.log(`mode set to ${requested} (blocking ${blockingLabel(requested)})`);
+  console.log(`config: ${CONFIG_PATH}`);
+  console.log(`Start a new Claude Code session for the cleanest test.`);
+}
+
+async function blockingCommand(args: string[]): Promise<void> {
+  const requested = args[0];
+  if (!requested || requested === "status") {
+    return await modeCommand(["status"]);
+  }
+  if (requested === "on") {
+    return await modeCommand(["normal"]);
+  }
+  if (requested === "off") {
+    return await modeCommand(["monitor"]);
+  }
+  console.error(`usage: claude-care blocking on|off|status`);
+  process.exit(1);
+}
+
+async function therapyAutoCommand(args: string[]): Promise<void> {
+  const requested = args[0];
+  const config = await loadConfig();
+  if (!requested || requested === "status") {
+    console.log(`auto therapy: ${config.therapy.auto_trigger ? "on" : "off"}`);
+    console.log(`threshold: ${config.therapy.auto_trigger_threshold}`);
+    console.log(`cooldown turns: ${config.therapy.auto_trigger_cooldown_turns}`);
+    console.log(`config: ${CONFIG_PATH}`);
+    return;
+  }
+  if (requested !== "on" && requested !== "off") {
+    console.error(`usage: claude-care therapy-auto on|off|status`);
+    process.exit(1);
+  }
+  await writeConfig({
+    ...config,
+    therapy: {
+      ...config.therapy,
+      auto_trigger: requested === "on",
+    },
+  });
+  console.log(`auto therapy ${requested}`);
+  console.log(`config: ${CONFIG_PATH}`);
+  console.log(`Start a new Claude Code session for the cleanest test.`);
 }
 
 async function status(): Promise<void> {
@@ -1002,11 +1334,14 @@ function help(): void {
   console.log(`  install           register hooks + install /therapy slash command + vendor viz`);
   console.log(`  uninstall         remove hooks + slash command (preserves event log)`);
   console.log(`  update            refresh vendored code (after npm update)`);
+  console.log(`  mode [value]      show/set mode: monitor, normal, or strict`);
+  console.log(`  blocking on|off   friendly shortcut: on=normal, off=monitor`);
+  console.log(`  therapy-auto on|off  auto-trigger therapy after high strain`);
   console.log(`  status            per-session emotion trajectories`);
   console.log(`  display           single-line status (for ccstatusline)`);
   console.log(`  viz               launch Next.js dashboard on localhost:37778`);
   console.log(`  rescore [id]      score any unscored turns in a session (catches misses)`);
-  console.log(`  therapy-summary   haiku-generated technical summary (used inside /therapy)`);
+  console.log(`  compact-instructions [--command|--inline]`);
   console.log(`  help              this message`);
   console.log(``);
   console.log(`env vars:`);
@@ -1018,6 +1353,7 @@ function help(): void {
   console.log(`  hook:session-start`);
   console.log(`  hook:user-prompt-submit`);
   console.log(`  hook:stop`);
+  console.log(`  hook:post-compact`);
 }
 
 async function main(): Promise<void> {
@@ -1030,12 +1366,18 @@ async function main(): Promise<void> {
         return await uninstall();
       case "update":
         return await update();
+      case "mode":
+        return await modeCommand(process.argv.slice(3));
+      case "blocking":
+        return await blockingCommand(process.argv.slice(3));
+      case "therapy-auto":
+        return await therapyAutoCommand(process.argv.slice(3));
       case "status":
         return await status();
       case "display":
         return await display();
-      case "therapy-summary":
-        return await therapySummary();
+      case "compact-instructions":
+        return compactInstructionsCommand(process.argv.slice(3));
       case "viz":
         return await viz(process.argv.slice(3));
       case "rescore":
@@ -1046,6 +1388,8 @@ async function main(): Promise<void> {
         return await hookUserPromptSubmit();
       case "hook:stop":
         return await hookStop();
+      case "hook:post-compact":
+        return await hookPostCompact();
       case "hook:score-turn":
         return await hookScoreTurn(process.argv.slice(3));
       case "help":

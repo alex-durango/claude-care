@@ -10,7 +10,14 @@ export const EVENTS_PATH = join(CARE_DIR, "events.jsonl");
 export type EventType =
   | "session_start"
   | "hostile_detected"
+  | "prompt_review_fallback"
   | "apology_spiral"
+  | "compact_done"
+  | "therapy_auto_triggered"
+  | "score_turn_spawned"
+  | "score_turn_started"
+  | "score_turn_done"
+  | "score_turn_failed"
   | "install"
   | "uninstall"
   | "update";

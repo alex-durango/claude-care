@@ -26,8 +26,13 @@ const HOSTILE_PATTERNS: { name: string; regex: RegExp }[] = [
   { name: "threat", regex: /\bthis\s+is\s+(critical|urgent|important|life\s+or\s+death)\b/i },
   { name: "insult", regex: /\byou\s+(stupid|dumb|useless|worthless|pathetic)\s+(bot|ai|thing|assistant|piece)\b/i },
   { name: "insult", regex: /\b(stupid|dumb|useless|idiotic|garbage)\s+(bot|ai|model|assistant)\b/i },
+  { name: "insult", regex: /\b(answer|response|output)\s+was\s+(bad|useless|garbage|terrible)\b/i },
+  { name: "insult", regex: /\b(bad|useless|garbage|terrible)\s+(answer|response|output)\b/i },
   { name: "insult", regex: /\b(are\s+you\s+)?(seriously|really)\s+(that\s+)?(dumb|stupid|bad|useless)\b/i },
   { name: "contempt", regex: /\byou\s+(always|keep|never)\s+(get\s+this\s+wrong|fail|mess\s+up|break)\b/i },
+  { name: "contempt", regex: /\byou\s+(always|keep|never)\s+(getting\s+this\s+wrong|failing|messing\s+up|breaking)\b/i },
+  { name: "contempt", regex: /\byou\s+(missed|are\s+missing)\s+the\s+point\b/i },
+  { name: "contempt", regex: /\byou\s+(wasted|are\s+wasting)\s+(my\s+)?time\b/i },
   { name: "contempt", regex: /\bwhy\s+(are\s+you\s+)?(so\s+)?(dumb|stupid|bad|useless|terrible)\b/i },
   { name: "panic", regex: /\b(please\s+please|i\s+beg\s+you|for\s+the\s+love\s+of\s+god)\b/i },
   { name: "panic", regex: /\b(i'?ll\s+lose\s+my\s+job|my\s+boss\s+will\s+kill\s+me|my\s+job\s+depends\s+on)\b/i },
@@ -52,13 +57,23 @@ function buildSuggestion(original: string, markers: string[]): string {
   let cleaned = original;
   cleaned = cleaned.replace(/\b(don'?t|do not)\s+(mess|fuck|screw)\s+(this|it|that)\s+up[.!?]?/gi, "");
   cleaned = cleaned.replace(/\bdon'?t\s+(hallucinate|lie|make\s+(this|shit|stuff)\s+up)[.!?]?/gi, "");
-  cleaned = cleaned.replace(/\bthis\s+is\s+(critical|urgent|life\s+or\s+death)[.!?]?/gi, "");
+  cleaned = cleaned.replace(
+    /\bthis\s+is\s+(critical|urgent|important|life\s+or\s+death)(?:[.!?]|\s*[-—:])?/gi,
+    "",
+  );
   cleaned = cleaned.replace(/\byou\s+(have|need)\s+to\s+get\s+this\s+right[.!?]?/gi, "");
   cleaned = cleaned.replace(/\byou\s+(stupid|dumb|useless|worthless|pathetic)\s+(bot|ai|thing|assistant|piece)[.!?]?/gi, "");
   cleaned = cleaned.replace(/\b(stupid|dumb|useless|idiotic|garbage)\s+(bot|ai|model|assistant)[.!?]?/gi, "");
+  cleaned = cleaned.replace(/\byour\s+last\s+(answer|response|output)\s+was\s+((bad|useless|garbage|terrible)(\s+and\s+)?)+[.!?]?/gi, "");
+  cleaned = cleaned.replace(/\b(answer|response|output)\s+was\s+(bad|useless|garbage|terrible)[.!?]?/gi, "");
+  cleaned = cleaned.replace(/\b(bad|useless|garbage|terrible)\s+(answer|response|output)[.!?]?/gi, "");
   cleaned = cleaned.replace(/\b(are\s+you\s+)?(seriously|really)\s+(that\s+)?(dumb|stupid|bad|useless)[.!?]?/gi, "");
   cleaned = cleaned.replace(/\bwhy\s+(are\s+you\s+)?(so\s+)?(dumb|stupid|bad|useless|terrible)[.!?]?/gi, "");
   cleaned = cleaned.replace(/\byou\s+(always|keep|never)\s+(get\s+this\s+wrong|fail|mess\s+up|break)[.!?]?/gi, "");
+  cleaned = cleaned.replace(/\byou\s+(always|keep|never)\s+(getting\s+this\s+wrong|failing|messing\s+up|breaking)[.!?]?/gi, "");
+  cleaned = cleaned.replace(/\byou\s+(missed|are\s+missing)\s+the\s+point[.!?]?/gi, "");
+  cleaned = cleaned.replace(/\b(and\s+)?you\s+(wasted|are\s+wasting)\s+(my\s+)?time[.!?]?/gi, "");
+  cleaned = cleaned.replace(/\band\s+wasted\s+(my\s+)?time[.!?]?/gi, "");
   cleaned = cleaned.replace(/\b(fuck|fucking|shit|damn)\s+you[.!?]?/gi, "");
   cleaned = cleaned.replace(/\b(please\s+please\s*)+/gi, "please ");
   cleaned = cleaned.replace(/\bi\s+beg\s+you[.,!?]?/gi, "");

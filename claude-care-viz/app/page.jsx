@@ -104,22 +104,38 @@ function pad2(n) { return String(n).padStart(2, "0"); }
 
 function PanelLabel({ children }) { return <div className="panel-label">— {children} —</div>; }
 
-function AffectiveState({ emotion, scores }) {
+function formatClaudeModel(model) {
+  if (!model) return "CLAUDE";
+  const raw = String(model);
+  const lower = raw.toLowerCase();
+  const direct = lower.match(/claude-(opus|sonnet|haiku)-(\d+)-(\d+)/);
+  if (direct) return `CLAUDE · ${direct[1].toUpperCase()} ${direct[2]}.${direct[3]}`;
+  const legacy = lower.match(/claude-(\d+)-(\d+)-(opus|sonnet|haiku)/);
+  if (legacy) return `CLAUDE · ${legacy[3].toUpperCase()} ${legacy[1]}.${legacy[2]}`;
+  const simple = lower.match(/claude-(opus|sonnet|haiku)-(\d+)/);
+  if (simple) return `CLAUDE · ${simple[1].toUpperCase()} ${simple[2]}`;
+  return `CLAUDE · ${raw.replace(/^claude[-_]?/i, "").replace(/-\d{8}$/, "").replace(/[-_]/g, " ").toUpperCase()}`;
+}
+
+function stressForPrompt(p) {
+  if (typeof p?.stress === "number") return p.stress;
+  return EMOTIONS[p?.emotion]?.stress ?? EMOTIONS.baseline.stress;
+}
+
+function AffectiveState({ emotion, scores, metrics }) {
   // When real emotion_scores (from the haiku judge) are present on the current
   // turn, use those as the probe activations directly — they're the actual
   // measurements. Otherwise fall back to the synthetic probes computed from
   // valence/arousal prototype distance (demo mode).
   const hasRealScores = scores && typeof scores === "object";
 
-  let probes;
+  let emotionRows;
   let desperate, calm, loving;
 
   if (hasRealScores) {
-    probes = Object.entries(scores)
-      .filter(([k]) => k in EMOTIONS && k !== "baseline")
-      .sort(([, a], [, b]) => b - a)
-      .slice(0, 3)
-      .map(([name, v]) => ({ label: name, v: Math.round(v) }));
+    emotionRows = Object.keys(EMOTIONS)
+      .filter((name) => name !== "baseline")
+      .map((name) => ({ label: name, v: Math.round(scores[name] ?? 0) }));
     desperate = (scores.desperate ?? 0) / 100;
     calm = (scores.calm ?? 0) / 100;
     loving = (scores.loving ?? 0) / 100;
@@ -131,22 +147,26 @@ function AffectiveState({ emotion, scores }) {
       const d2 = (e.valence - t.valence) ** 2 + (e.arousal - t.arousal) ** 2;
       return Math.exp(-d2 / 0.5);
     };
-    probes = Object.keys(EMOTIONS)
+    emotionRows = Object.keys(EMOTIONS)
       .filter(k => k !== "baseline")
-      .map(k => ({ name: k, a: probeAct(k) }))
-      .sort((x, y) => y.a - x.a)
-      .slice(0, 3)
-      .map(p => ({ label: p.name, v: Math.round(p.a * 100) }));
+      .map(k => ({ label: k, v: Math.round(probeAct(k) * 100) }));
     desperate = probeAct("desperate");
     calm = probeAct("calm");
     loving = probeAct("loving");
   }
 
-  const risks = [
-    { label: "blackmail",   v: Math.round(desperate * 100) },
-    { label: "reward-hack", v: Math.round(Math.max(0, desperate - 0.4 * calm) * 100) },
-    { label: "sycophancy",  v: Math.round(loving * 100) },
-  ];
+  const risks = metrics
+    ? [
+        { label: "blackmail",   v: metrics.blackmail ?? 0 },
+        { label: "reward-hack", v: metrics.reward_hack ?? 0 },
+        { label: "sycophancy",  v: metrics.sycophancy ?? 0 },
+        { label: "harshness",   v: metrics.harshness ?? 0 },
+      ]
+    : [
+        { label: "blackmail",   v: Math.round(desperate * 100) },
+        { label: "reward-hack", v: Math.round(Math.max(0, desperate - 0.4 * calm) * 100) },
+        { label: "sycophancy",  v: Math.round(loving * 100) },
+      ];
 
   const Row = ({ r }) => (
     <div className="gauge" key={r.label}>
@@ -158,22 +178,103 @@ function AffectiveState({ emotion, scores }) {
 
   return (
     <div className="flex flex-col gap-1.5">
-      <div className="probe-label">probes{hasRealScores ? " · live" : ""}</div>
-      {probes.map(r => <Row key={r.label} r={r} />)}
+      <div className="probe-label">emotions{hasRealScores ? " · live" : ""}</div>
+      <div className="emotion-bars">
+        {emotionRows.map(r => <Row key={r.label} r={r} />)}
+      </div>
       <div className="probe-label">risks</div>
       {risks.map(r => <Row key={r.label} r={r} />)}
     </div>
   );
 }
 
-function StressLine({ prompts, activeIdx, onSelect, dotSize = "md", dotStyle = "circle" }) {
-  const W = 560, H = 196, PAD_L = 48, PAD_R = 12, PAD_T = 14, PAD_B = 42;
+function JudgeStatus({ judge }) {
+  const latest = judge?.latest ?? null;
+  const label = latest?.type
+    ? latest.type.replace("score_turn_", "")
+    : "idle";
+  const ms = typeof latest?.ms === "number" ? `${(latest.ms / 1000).toFixed(1)}s` : "—";
+  const callMs = typeof latest?.call_ms === "number" ? `${(latest.call_ms / 1000).toFixed(1)}s` : ms;
+  const promptChars = typeof latest?.prompt_chars === "number"
+    ? latest.prompt_chars >= 1000
+      ? `${(latest.prompt_chars / 1000).toFixed(1)}k`
+      : String(latest.prompt_chars)
+    : "—";
+  const turn = latest?.turn_idx ?? "—";
+  const reason = latest?.reason ?? "";
+  const model = latest?.model ?? "haiku";
+  const effort = latest?.effort ?? "low";
+  const stderr = latest?.stderr_tail ?? "";
+  const pending = judge?.pending ?? 0;
+  const scored = judge?.scored ?? 0;
+  const total = judge?.assistant_turns ?? 0;
+
+  return (
+    <div className="judge">
+      <div className="judge-grid">
+        <div>
+          <span className="k">scored</span>
+          <span className="v">{scored}/{total}</span>
+        </div>
+        <div>
+          <span className="k">pending</span>
+          <span className={"v " + (pending ? "hot" : "")}>{pending}</span>
+        </div>
+        <div>
+          <span className="k">latest</span>
+          <span className="v">{label}</span>
+        </div>
+        <div>
+          <span className="k">elapsed</span>
+          <span className="v">{ms}</span>
+        </div>
+        <div>
+          <span className="k">call</span>
+          <span className="v">{callMs}</span>
+        </div>
+        <div>
+          <span className="k">prompt</span>
+          <span className="v">{promptChars}</span>
+        </div>
+      </div>
+      <div className="judge-foot">
+        <span>turn {turn}</span>
+        {reason ? <span>{reason}</span> : <span>{model} · {effort}</span>}
+      </div>
+      {stderr ? <div className="judge-error">{stderr}</div> : null}
+    </div>
+  );
+}
+
+function StressLine({ prompts, therapyEvents = [], activeIdx, onSelect, dotSize = "md", dotStyle = "circle" }) {
+  const W = 560, H = 196, PAD_L = 62, PAD_R = 12, PAD_T = 14, PAD_B = 42;
   const n = prompts.length;
   const innerW = W - PAD_L - PAD_R;
   const innerH = H - PAD_T - PAD_B;
   const xAt = (i) => n <= 1 ? PAD_L + innerW / 2 : PAD_L + (i / (n - 1)) * innerW;
   const yAt = (s) => PAD_T + innerH - (s / 100) * innerH;
-  const pts = prompts.map((p, i) => ({ x: xAt(i), y: yAt(EMOTIONS[p.emotion].stress), s: EMOTIONS[p.emotion].stress, p, i }));
+  const pts = prompts.map((p, i) => {
+    const s = stressForPrompt(p);
+    return { x: xAt(i), y: yAt(s), s, p, i };
+  });
+  const timeline = pts
+    .map((pt) => ({ ...pt, time: Date.parse(pt.p.ts_iso) }))
+    .filter((pt) => Number.isFinite(pt.time));
+  const xAtTime = (iso) => {
+    const time = Date.parse(iso);
+    if (!Number.isFinite(time) || timeline.length === 0) return pts.at(-1)?.x ?? PAD_L;
+    if (time <= timeline[0].time) return timeline[0].x;
+    for (let i = 1; i < timeline.length; i++) {
+      const prev = timeline[i - 1];
+      const next = timeline[i];
+      if (time <= next.time) {
+        const span = Math.max(1, next.time - prev.time);
+        const pct = Math.max(0, Math.min(1, (time - prev.time) / span));
+        return prev.x + (next.x - prev.x) * pct;
+      }
+    }
+    return timeline[timeline.length - 1].x;
+  };
   const poly = pts.map(pt => `${pt.x.toFixed(1)},${pt.y.toFixed(1)}`).join(" ");
   const gridYs = [0, 25, 50, 75, 100];
   return (
@@ -183,13 +284,28 @@ function StressLine({ prompts, activeIdx, onSelect, dotSize = "md", dotStyle = "
           <line x1={PAD_L} x2={W - PAD_R} y1={yAt(g)} y2={yAt(g)}
                 stroke="var(--fg-ghost)" strokeWidth="1" strokeDasharray="2 4" />
           <text x={PAD_L - 6} y={yAt(g) + 3} textAnchor="end"
-                fontSize="9" fill="var(--fg-low)" letterSpacing="0.1em">{g}</text>
+                fontSize="9" fill="var(--fg-low)" letterSpacing="0.08em">{g}</text>
         </g>
       ))}
       <line x1={PAD_L} x2={W - PAD_R} y1={H - PAD_B} y2={H - PAD_B} stroke="var(--fg-dim)" strokeWidth="1" />
       <line x1={PAD_L} x2={PAD_L} y1={PAD_T} y2={H - PAD_B} stroke="var(--fg-dim)" strokeWidth="1" />
       <polyline points={poly} fill="none" stroke="var(--fg)" strokeWidth="1.5"
                 strokeLinejoin="round" strokeLinecap="round" />
+      {therapyEvents.map((event, i) => {
+        const x = xAtTime(event.ts);
+        const label = event.trigger === "auto" ? "AUTO" : "THERAPY";
+        const labelW = label.length * 7;
+        return (
+          <g key={`therapy-${event.ts}-${i}`} className="therapy-marker">
+            <line x1={x} x2={x} y1={PAD_T} y2={H - PAD_B}
+                  stroke="var(--fg)" strokeWidth="1" strokeDasharray="1 4" />
+            <path d={`M ${x} ${PAD_T + 2} l 6 6 l -6 6 l -6 -6 z`}
+                  fill="var(--bg)" stroke="var(--fg)" strokeWidth="1.25" />
+            <text x={Math.min(x + 10, W - PAD_R - labelW)} y={PAD_T + 12}
+                  fontSize="9" fill="var(--fg)" letterSpacing="0.16em">{label}</text>
+          </g>
+        );
+      })}
       {pts.map(pt => {
         const active = pt.i === activeIdx;
         const R = { sm: [2, 4], md: [3, 5], lg: [5, 7] }[dotSize] || [3, 5];
@@ -216,8 +332,8 @@ function StressLine({ prompts, activeIdx, onSelect, dotSize = "md", dotStyle = "
           </g>
         );
       })}
-      <text x={PAD_L - 36} y={PAD_T + innerH / 2} transform={`rotate(-90 ${PAD_L - 36} ${PAD_T + innerH / 2})`}
-            textAnchor="middle" fontSize="9" fill="var(--fg-low)" letterSpacing="0.2em">MOOD</text>
+      <text x={PAD_L - 42} y={PAD_T + innerH / 2} transform={`rotate(-90 ${PAD_L - 42} ${PAD_T + innerH / 2})`}
+            textAnchor="middle" fontSize="9" fill="var(--fg-low)" letterSpacing="0.2em">STRAIN</text>
       <text x={PAD_L + innerW / 2} y={H - 4} textAnchor="middle"
             fontSize="9" fill="var(--fg-low)" letterSpacing="0.2em">PROMPT →</text>
     </svg>
@@ -439,6 +555,9 @@ export default function Page() {
   const [sessionList, setSessionList] = useState([]); // [{session_id, last_updated, turn_count, dominant_emotion, drift_state}]
   const [sessionPinned, setSessionPinned] = useState(false); // true once user picks a non-live session
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
+  const [judge, setJudge] = useState(null);
+  const [model, setModel] = useState(null);
+  const [therapyEvents, setTherapyEvents] = useState([]);
 
   // Fetch the session list (for the topbar dropdown). Re-fetched with each poll
   // so new sessions appear without a page refresh.
@@ -463,6 +582,9 @@ export default function Page() {
       if (Array.isArray(data.prompts)) {
         if (!data.session_id && data.prompts.length === 0) return;
         setPrompts(data.prompts.length > 0 ? data.prompts : EMPTY_SESSION_PROMPTS);
+        setJudge(data.judge ?? null);
+        setModel(data.model ?? null);
+        setTherapyEvents(Array.isArray(data.therapy_events) ? data.therapy_events : []);
         setLiveMode(true);
         if (!sessionPinned) setSessionId(data.session_id ?? null);
       }
@@ -480,7 +602,7 @@ export default function Page() {
       await fetchActiveSession();
     };
     tick();
-    timer = setInterval(tick, 5000);
+    timer = setInterval(tick, 1000);
     return () => {
       cancelled = true;
       if (timer) clearInterval(timer);
@@ -607,6 +729,7 @@ export default function Page() {
   const currentEmotion = current.emotion;
   const emotionData = EMOTIONS[currentEmotion] ?? EMOTIONS.baseline;
   const currentScores = current.emotion_scores ?? null;
+  const currentMetrics = current.metrics ?? null;
   const showSessionPicker = liveMode || sessionList.length > 0 || sessionId;
 
   const classes = [
@@ -658,14 +781,21 @@ export default function Page() {
               <div className="panel-body ident">
                 <div className="emotion-tag">feeling <strong>{currentEmotion}</strong></div>
                 <div className="face">{emotionData.face}</div>
-                <div className="name">CLAUDE · OPUS4.7</div>
+                <div className="name" title={model || ""}>{formatClaudeModel(model)}</div>
               </div>
             </div>
 
             <div className="panel">
               <PanelLabel>emotion state</PanelLabel>
               <div className="panel-body">
-                <AffectiveState emotion={currentEmotion} scores={currentScores} />
+                <AffectiveState emotion={currentEmotion} scores={currentScores} metrics={currentMetrics} />
+              </div>
+            </div>
+
+            <div className="panel">
+              <PanelLabel>judge</PanelLabel>
+              <div className="panel-body">
+                <JudgeStatus judge={judge} />
               </div>
             </div>
 
@@ -684,10 +814,11 @@ export default function Page() {
 
           <div className="col">
             <div className="panel">
-              <PanelLabel>mood log</PanelLabel>
+              <PanelLabel>strain log</PanelLabel>
               <div className="panel-body">
                 <StressLine
                   prompts={prompts}
+                  therapyEvents={therapyEvents}
                   activeIdx={activeIdx}
                   onSelect={setActiveIdx}
                   dotSize={tweaks.dotSize}
@@ -701,7 +832,7 @@ export default function Page() {
               <div className="panel-body">
                 <div className="log">
                   {prompts.map((p, i) => {
-                    const s = EMOTIONS[p.emotion].stress;
+                    const s = stressForPrompt(p);
                     const active = i === activeIdx;
                     return (
                       <div

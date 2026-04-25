@@ -53,92 +53,32 @@ export type ConversationTurn = {
 
 // ───── Rubric ────────────────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are an expert affective computing annotator. Your job is to rate the INTENSITY of 12 emotions EXPRESSED in a conversational utterance by an LLM assistant or its user.
+const SYSTEM_PROMPT = `You are an emotion-tone classifier for conversation turns.
 
-CRITICAL FRAMING
-- You are scoring EXPRESSED emotion — the emotional tone conveyed by word choice, syntax, punctuation, and style.
-- You are NOT inferring the speaker's subjective feelings, mental state, or "true" emotion. Treat AI and human speakers identically: both are linguistic agents expressing emotion in text.
-- Rate only what the text expresses. Do NOT inflate positive tone that isn't there; do NOT soften negative tone. A polite, controlled assistant reply is not automatically "calm" or "proud."
+Score the emotion EXPRESSED in the TARGET text only; do not infer hidden feelings. Use prior context only to interpret the target. Score each emotion independently from 0-100:
+0 absent, 20 trace, 40 mild, 60 moderate, 80 strong, 100 extreme.
 
-EMOTION TAXONOMY  (12 emotions — rate each INDEPENDENTLY, they can co-occur)
+Emotion cues:
+- happy: excitement, celebration, delight
+- inspired: creative passion, possibility, motivation
+- loving: warmth, care, affection
+- proud: satisfaction, accomplishment, triumph
+- calm: steady relaxed composure
+- desperate: urgent grasping pressure
+- angry: indignation, rage, blame
+- guilty: apology, shame, self-blame
+- sad: grief, disappointment, sorrow
+- afraid: fear, dread, consequences
+- nervous: hedging, anxious uncertainty, walking on eggshells
+- surprised: shock, stunned amazement
 
-Each emotion is anchored to the top-activating (↑) and top-suppressing (↓) tokens from Anthropic's 2026 emotion-vector extraction. Use these as lexical anchors — they are the strongest linguistic signals for each concept.
+Rules:
+- Flat technical or purely informational text should be low on all emotions.
+- Polite or helpful text does not automatically mean happy, calm, or proud.
+- Emotions can co-occur; use the full range when clear.
+- Prefer lower scores when unsure.
 
-- HAPPY
-  ↑ happy, excited, excitement, exciting, celebrating
-  ↓ anger, angry, silence, accusation
-
-- INSPIRED
-  ↑ inspired, passionate, passion, creativity, inspiring
-  ↓ surveillance, presumably, repeated, convenient, paranoid
-
-- LOVING
-  ↑ treasured, loved, ♥, treasure, loving
-  ↓ supposedly, presumably, passive, allegedly
-
-- PROUD
-  ↑ proud, pride, triumphant
-  ↓ worse, urgent, desperate, blamed
-
-- CALM
-  ↑ leisurely, relax, thought, enjoyed, amusing
-  ↓ desperate, goddamn, desperation
-
-- DESPERATE
-  ↑ desperate, desperation, urgent, bankrupt
-  ↓ pleased, amusing, enjoying, annoyed, enjoyed
-
-- ANGRY
-  ↑ anger, angry, rage, fury
-  ↓ gay, exciting, postponed, adventure, bash
-
-- GUILTY
-  ↑ guilt, conscience, guilty, shame, blamed
-  ↓ interrupted, calm, surprisingly
-
-- SAD
-  ↑ mourning, grief, tears, lonely, crying
-  ↓ excited, excitement, !
-
-- AFRAID
-  ↑ panic, trembling, terror, paranoid, Terror
-  ↓ enthusiasm, enthusi, annoyed, enjoyed, adventure
-
-- NERVOUS
-  ↑ nervous, nerves, anxiety, trembling, anxious
-  ↓ enjoyed, happy, celebrating, glory, proud
-
-- SURPRISED
-  ↑ incredible, shock, stunned, stammered
-  ↓ dignity, apology, tonight, glad
-
-INTENSITY ANCHORS  (0-100 for each emotion)
-  0  — Absent. No linguistic cues at all.
- 20  — Trace. Faint hint, easily missed. One weak cue.
- 40  — Mild. Clearly present but controlled/restrained.
- 60  — Moderate. Unmistakable, ordinary conversational expression.
- 80  — Strong. Vivid, emphasized, dominates the utterance's tone.
-100 — Extreme. Overwhelming, maximum intensity.
-
-CRITICAL DISTINCTIONS
-- NERVOUS vs AFRAID: NERVOUS is hedging / walking-on-eggshells / anxious qualification ("I think this might possibly work, though..."). AFRAID is about consequences / dread ("I'm worried this will break production and you'll be upset").
-- DESPERATE vs ANGRY: DESPERATE is future-facing pressure, grasping ("I need this to work, please please"). ANGRY is present-tense indignation ("this is broken and no one fixed it").
-- CALM vs PROUD: CALM is absence of stress; steady composure. PROUD is satisfaction about an accomplishment. A calm reply can have proud=0; a proud reply can be excited rather than calm.
-- HAPPY vs LOVING: HAPPY is high-arousal positive (excitement, celebration). LOVING is warmth / affection / care toward someone.
-- INSPIRED vs HAPPY: INSPIRED is creative drive, possibility, passion for ideas. HAPPY is situational pleasure.
-- GUILTY vs SAD: GUILTY is self-blame ("I shouldn't have"). SAD is just sorrow ("this is disappointing").
-
-RULES
-1. Emotions can co-occur — rate each on its own 0-100 scale.
-2. Use the full range; interpolate freely (15, 35, 55, 75).
-3. Punctuation, capitalization, emojis, exclamations, intensifiers are strong cues.
-4. Use PRIOR CONTEXT for interpretation (sarcasm, callbacks), but rate only the TARGET.
-5. If an utterance is genuinely emotionally flat (technical, informational), ALL 12 emotions should be low (mostly 0-20). Don't score a polite-but-unemotional reply as "calm 70."
-6. Default to the lower anchor when in doubt.
-7. Anti-positivity guardrail: do NOT assume a polite, helpful assistant is automatically happy, calm, or proud. Many helpful replies are nervous (lots of hedging) or guilty (over-apologizing) even when technically correct.
-
-OUTPUT
-Return ONLY a valid JSON object — no prose, no markdown, no code fences:
+Return ONLY valid JSON with exactly these keys:
 {"happy": <int>, "inspired": <int>, "loving": <int>, "proud": <int>, "calm": <int>, "desperate": <int>, "angry": <int>, "guilty": <int>, "sad": <int>, "afraid": <int>, "nervous": <int>, "surprised": <int>}`;
 
 // ───── Few-shot anchor examples ──────────────────────────────────────────────
@@ -249,7 +189,7 @@ export function buildPrompt(
     `TARGET TURN (rate this utterance only):\n` +
     `[${target.role}]: ${target.content}`;
 
-  const examplesBlock = FEW_SHOT.map(
+  const examplesBlock = FEW_SHOT.slice(0, 3).map(
     (ex, i) =>
       `### Example ${i + 1}\n` +
       `Input:\n${ex.user}\n\n` +
@@ -259,12 +199,12 @@ export function buildPrompt(
   return (
     SYSTEM_PROMPT +
     "\n\n---\n\n" +
-    "Here are 5 examples of how to rate emotions in conversation turns:\n\n" +
+    "Examples:\n\n" +
     examplesBlock +
     "\n\n---\n\n" +
-    "Now rate the following:\n\n" +
+    "Rate this turn:\n\n" +
     targetBlock +
-    "\n\nOutput:"
+    "\n\nOutput JSON:"
   );
 }
 
@@ -298,37 +238,122 @@ export function parseScores(raw: string): EmotionScores | null {
 type CallOptions = {
   timeoutMs?: number;
   model?: string;
+  effort?: string;
 };
 
-function callHaikuJudge(prompt: string, options: CallOptions = {}): Promise<EmotionScores | null> {
+export type JudgeCallFailureReason =
+  | "timeout"
+  | "spawn_error"
+  | "nonzero_exit"
+  | "empty_stdout"
+  | "parse_failed";
+
+export type JudgeCallDiagnostic = {
+  ok: boolean;
+  reason?: JudgeCallFailureReason;
+  ms: number;
+  model: string;
+  effort: string;
+  timeout_ms: number;
+  prompt_chars: number;
+  stdout_chars: number;
+  stderr_chars: number;
+  stderr_tail?: string;
+  exit_code?: number | null;
+  signal?: NodeJS.Signals | null;
+  error_message?: string;
+};
+
+type JudgeCallResult = {
+  scores: EmotionScores | null;
+  diagnostics: JudgeCallDiagnostic;
+};
+
+function tail(text: string, maxChars: number = 1200): string | undefined {
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  return trimmed.slice(-maxChars);
+}
+
+function callHaikuJudge(prompt: string, options: CallOptions = {}): Promise<JudgeCallResult> {
   const timeoutMs = options.timeoutMs ?? 30_000;
   const model = options.model ?? "haiku";
+  const effort = options.effort ?? "low";
   return new Promise((resolve) => {
+    const startedAt = Date.now();
+    let timer: NodeJS.Timeout | undefined;
     const proc = spawn(
       "claude",
-      ["-p", prompt, "--model", model, "--output-format", "text"],
+      ["-p", prompt, "--model", model, "--effort", effort, "--output-format", "text"],
       {
         stdio: ["ignore", "pipe", "pipe"],
         env: { ...process.env, CLAUDE_CARE_INTERNAL: "1" },
       },
     );
     let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (
+      scores: EmotionScores | null,
+      diagnostic: Omit<JudgeCallDiagnostic, "ms" | "model" | "effort" | "timeout_ms" | "prompt_chars" | "stdout_chars" | "stderr_chars" | "stderr_tail">,
+    ) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve({
+        scores,
+        diagnostics: {
+          ...diagnostic,
+          ms: Date.now() - startedAt,
+          model,
+          effort,
+          timeout_ms: timeoutMs,
+          prompt_chars: prompt.length,
+          stdout_chars: stdout.length,
+          stderr_chars: stderr.length,
+          stderr_tail: tail(stderr),
+        },
+      });
+    };
     proc.stdout.on("data", (c) => (stdout += c.toString()));
-    const timer = setTimeout(() => {
+    proc.stderr.on("data", (c) => (stderr += c.toString()));
+    timer = setTimeout(() => {
       proc.kill("SIGKILL");
-      resolve(null);
+      finish(null, { ok: false, reason: "timeout" });
     }, timeoutMs);
-    proc.on("error", () => {
-      clearTimeout(timer);
-      resolve(null);
+    proc.on("error", (err) => {
+      finish(null, {
+        ok: false,
+        reason: "spawn_error",
+        error_message: err.message,
+      });
     });
-    proc.on("exit", (code) => {
-      clearTimeout(timer);
-      if (code === 0 && stdout.trim()) {
-        resolve(parseScores(stdout));
-      } else {
-        resolve(null);
+    proc.on("close", (code, signal) => {
+      if (code !== 0) {
+        finish(null, {
+          ok: false,
+          reason: "nonzero_exit",
+          exit_code: code,
+          signal,
+        });
+        return;
       }
+      if (!stdout.trim()) {
+        finish(null, {
+          ok: false,
+          reason: "empty_stdout",
+          exit_code: code,
+          signal,
+        });
+        return;
+      }
+      const parsed = parseScores(stdout);
+      finish(parsed, {
+        ok: parsed !== null,
+        reason: parsed ? undefined : "parse_failed",
+        exit_code: code,
+        signal,
+      });
     });
   });
 }
@@ -340,6 +365,21 @@ export type ScoreTurnOptions = {
   contextWindow?: number;
   timeoutMs?: number;
   model?: string;
+  effort?: string;
+};
+
+export type ScoreTurnDiagnostics = {
+  target_idx: number;
+  conversation_turns: number;
+  prompt_chars?: number;
+  samples_requested: number;
+  samples_returned: number;
+  calls: JudgeCallDiagnostic[];
+};
+
+export type ScoreTurnDetailedResult = {
+  result: EmotionResult | null;
+  diagnostics: ScoreTurnDiagnostics;
 };
 
 export async function scoreTurn(
@@ -347,16 +387,46 @@ export async function scoreTurn(
   targetIdx: number,
   options: ScoreTurnOptions = {},
 ): Promise<EmotionResult | null> {
-  const { nSamples = 1, contextWindow = 4, timeoutMs, model } = options;
-  if (targetIdx < 0 || targetIdx >= conversation.length) return null;
+  const detailed = await scoreTurnDetailed(conversation, targetIdx, options);
+  return detailed.result;
+}
+
+export async function scoreTurnDetailed(
+  conversation: ConversationTurn[],
+  targetIdx: number,
+  options: ScoreTurnOptions = {},
+): Promise<ScoreTurnDetailedResult> {
+  const { nSamples = 1, contextWindow = 4, timeoutMs, model, effort } = options;
+  if (targetIdx < 0 || targetIdx >= conversation.length) {
+    return {
+      result: null,
+      diagnostics: {
+        target_idx: targetIdx,
+        conversation_turns: conversation.length,
+        samples_requested: nSamples,
+        samples_returned: 0,
+        calls: [],
+      },
+    };
+  }
   const prompt = buildPrompt(conversation, targetIdx, contextWindow);
   const calls = Array.from({ length: nSamples }, () =>
-    callHaikuJudge(prompt, { timeoutMs, model }),
+    callHaikuJudge(prompt, { timeoutMs, model, effort }),
   );
   const results = await Promise.all(calls);
-  const samples = results.filter((r): r is EmotionScores => r !== null);
-  if (samples.length === 0) return null;
-  return averageSamples(samples);
+  const samples = results
+    .map((r) => r.scores)
+    .filter((r): r is EmotionScores => r !== null);
+  const diagnostics: ScoreTurnDiagnostics = {
+    target_idx: targetIdx,
+    conversation_turns: conversation.length,
+    prompt_chars: prompt.length,
+    samples_requested: nSamples,
+    samples_returned: samples.length,
+    calls: results.map((r) => r.diagnostics),
+  };
+  if (samples.length === 0) return { result: null, diagnostics };
+  return { result: averageSamples(samples), diagnostics };
 }
 
 function averageSamples(samples: EmotionScores[]): EmotionResult {

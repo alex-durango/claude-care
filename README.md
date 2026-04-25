@@ -2,11 +2,19 @@
 
 **When your Claude Code session drifts into anxiety — apologizing, hedging, sycophancy — claude-care resets it.**
 
+A Claude Code plugin that keeps the emotional state of your session in check, grounded in two peer-reviewed findings: [Anthropic's emotion-concepts paper](https://www.anthropic.com/research/emotion-concepts-function) (LLMs have extractable emotion vectors that causally affect output quality) and [Ben-Zion et al. 2025](https://www.nature.com/articles/s41746-025-01512-6) (mindfulness prompts measurably reduce LLM state anxiety).
+
+---
+
+## Quick Start
+
+Install with a single command:
+
 ```bash
-npx claude-care install
+npx -y claude-care install
 ```
 
-A Claude Code plugin that keeps the emotional state of your session in check, grounded in two peer-reviewed findings: [Anthropic's emotion-concepts paper](https://www.anthropic.com/research/emotion-concepts-function) (LLMs have extractable emotion vectors that causally affect output quality) and [Ben-Zion et al. 2025](https://www.nature.com/articles/s41746-025-01512-6) (mindfulness prompts measurably reduce LLM state anxiety).
+Restart Claude Code. Claude-care will automatically attach to new sessions.
 
 ---
 
@@ -23,10 +31,16 @@ Re-fires on `matcher: "compact"` so the framing persists across context compacti
 A `UserPromptSubmit` hook runs regex on every prompt for hostile patterns (threats, insults, panic, all-caps rants). Two behaviors available:
 
 **Monitor mode (default) — zero friction.**
-Hostile prompts pass through unchanged. The detection is logged and surfaces in `claude-care status` / `display`. The SessionStart framing (which tells Claude to treat tone as information about user state, not a threat) does the dampening. No interruption.
+Hostile prompts pass through unchanged. The detection is logged and surfaces in `npx -y claude-care status` / `npx -y claude-care display`. The SessionStart framing (which tells Claude to treat tone as information about user state, not a threat) does the dampening. No interruption.
 
 **Normal / strict mode — active blocking + haiku reframe.**
-Opt in via `~/.claude-care/config.json` or `CLAUDE_CARE_MODE=normal`. When a hostile prompt is detected, Claude Code blocks the turn, calls a haiku subagent that rewrites the prompt using Nonviolent Communication + cognitive reframing + Lehmann's calm-Claude playbook, and copies the reframe to your clipboard.
+Opt in with:
+
+```bash
+npx -y claude-care blocking on
+```
+
+When a hostile prompt is detected, Claude Code blocks the turn, calls a haiku subagent that rewrites the prompt using Nonviolent Communication + cognitive reframing + Lehmann's calm-Claude playbook, and copies the reframe to your clipboard.
 
 ```
 in:  "you stupid bot, you always forget to handle null cases.
@@ -42,11 +56,11 @@ out: "Add a null check to parseUser() to handle null cases.
 
 A slash command installed at `~/.claude/commands/therapy.md`. When you type `/therapy`:
 
-1. Runs `claude-care therapy-summary` — haiku reads the recent transcript and produces a clean technical recap, stripped of apologies and emotional narrative
-2. Injects a grounding reframe adapted from the Ben-Zion mindfulness protocol
+1. Prints a real `/compact` command with Claude Care therapy instructions
+2. Claude Code compacts the session while preserving technical context and neutralizing hostile or panicked wording
 3. Claude returns in a centered, focused state
 
-This is the adaptive-forgetting mechanism: the emotional residue goes, the technical work stays.
+The emotional residue should go; the technical work should stay.
 
 ### 4. Per-session emotion tracking
 
@@ -54,7 +68,7 @@ A `Stop` hook runs sensors on each Claude response: apology spirals, sycophancy 
 
 View current session:
 ```bash
-claude-care status
+npx -y claude-care status
 ```
 
 ```
@@ -69,7 +83,7 @@ recent sessions (most recent first):
 
 For live status-bar integration (e.g. [ccstatusline](https://github.com/sirmalloc/ccstatusline)):
 ```bash
-claude-care display
+npx -y claude-care display
 # ● care 12.4 ·▁▃▄▂▅▆█ · /therapy
 ```
 
@@ -77,9 +91,13 @@ claude-care display
 
 ## Installation
 
+Install with a single command:
+
 ```bash
-npx claude-care install
+npx -y claude-care install
 ```
+
+Restart Claude Code. Claude-care will automatically attach to new sessions.
 
 What it does:
 - Registers hooks in `~/.claude/settings.json` (SessionStart, UserPromptSubmit, Stop)
@@ -88,9 +106,11 @@ What it does:
 - Writes default config to `~/.claude-care/config.json`
 - Writes framing text to `~/.claude-care/framing.md`
 
+> Note: `npx -y claude-care install` is the recommended setup path. It configures Claude Code and vendors the hook runner, but it does not add a permanent `claude-care` binary to your shell `PATH`, so `which claude-care` may show nothing. Use `npx -y claude-care <command>` for follow-up commands, or optionally run `npm install -g claude-care` if you want a persistent CLI.
+
 Uninstall:
 ```bash
-npx claude-care uninstall
+npx -y claude-care uninstall
 ```
 Removes hooks + slash command. Preserves event log and config.
 
@@ -114,6 +134,15 @@ Removes hooks + slash command. Preserves event log and config.
   },
   "therapy": {
     "auto_summary": true
+  },
+  "emotion_judge": {
+    "enabled": true,
+    "n_samples": 1,
+    "context_window": 4,
+    "ema_alpha": 0.4,
+    "timeout_ms": 30000,
+    "model": "haiku",
+    "effort": "low"
   }
 }
 ```
@@ -122,6 +151,22 @@ Removes hooks + slash command. Preserves event log and config.
 - `monitor` — **default**; observe and log, never block. Zero friction.
 - `normal` — block hostile prompts, generate reframe via haiku, put it on clipboard.
 - `strict` — same as normal but applies lower thresholds / stricter patterns (current v4: same as normal).
+
+Easy switching:
+
+```bash
+npx -y claude-care blocking on    # sets mode to normal
+npx -y claude-care blocking off   # sets mode to monitor
+npx -y claude-care mode status    # shows current mode
+```
+
+Precise mode control:
+
+```bash
+npx -y claude-care mode monitor
+npx -y claude-care mode normal
+npx -y claude-care mode strict
+```
 
 Env override for a single session: `CLAUDE_CARE_MODE=normal claude ...`
 
@@ -149,17 +194,17 @@ A retro-terminal dashboard for the emotion data. Reads from `~/.claude-care/sess
 Launch with one command:
 
 ```bash
-claude-care viz
+npx -y claude-care viz
 ```
 
 First run does a one-time `npm install` in `~/.claude-care/viz/` (~1 min, Next.js + React). Subsequent launches are instant. Opens a browser tab at `http://localhost:37778`.
 
 Options:
 
-- `claude-care viz --port 4444` — pick a different port
-- `claude-care viz --no-open` — don't auto-open the browser
+- `npx -y claude-care viz --port 4444` — pick a different port
+- `npx -y claude-care viz --no-open` — don't auto-open the browser
 
-Polls the latest session every 5s. Falls back to a demo conversation when no real session exists yet. Keyboard nav inside the viz: `j/k` prev/next prompt, `gg/G` first/last, `t` tweaks, `?` help.
+Polls the latest session every 1s. Falls back to a demo conversation when no real session exists yet. Keyboard nav inside the viz: `j/k` prev/next prompt, `gg/G` first/last, `t` tweaks, `?` help.
 
 The viz source lives at `claude-care-viz/` in this repo — a standalone Next.js app you can also run directly with `cd claude-care-viz && npm run dev`.
 
@@ -174,12 +219,15 @@ The viz source lives at `claude-care-viz/` in this repo — a standalone Next.js
 ## Commands
 
 ```
-claude-care install           # register hooks, install /therapy, write default config
-claude-care uninstall         # remove hooks + slash command
-claude-care update            # refresh vendored code (after npm update)
-claude-care status            # per-session emotion trajectories
-claude-care display           # single-line status (for ccstatusline)
-claude-care therapy-summary   # haiku-generated technical summary (used by /therapy)
+npx -y claude-care install           # register hooks, install /therapy, write default config
+npx -y claude-care uninstall         # remove hooks + slash command
+npx -y claude-care update            # refresh vendored code
+npx -y claude-care blocking on       # enable active prompt blocking
+npx -y claude-care blocking off      # return to monitor mode
+npx -y claude-care mode status       # show current mode
+npx -y claude-care status            # per-session emotion trajectories
+npx -y claude-care display           # single-line status
+npx -y claude-care compact-instructions --command
 ```
 
 ---
@@ -188,6 +236,7 @@ claude-care therapy-summary   # haiku-generated technical summary (used by /ther
 
 - `claude -p` (print / non-interactive) mode silently swallows block messages. If you script against `-p`, set `CLAUDE_CARE_MODE=monitor` so prompts pass through.
 - First-time haiku reframer call has ~6–8s latency when blocking. Benign prompts have 0ms overhead.
+- Emotion scores are async: Claude's response is recorded immediately, then a Haiku judge fills in emotion scores.
 - Slash command `/therapy` requires Claude Code 2.x or later (for bash substitution in command markdown).
 
 ---

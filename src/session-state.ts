@@ -44,9 +44,8 @@ export type SessionState = {
   turns: TurnRecord[];
 };
 
-// Find the most recently updated session. Used by the `display` and
-// `therapy-summary` commands which run outside a hook and need to guess which
-// session is "current."
+// Find the most recently updated session. Used by commands such as `display`
+// that run outside a hook and need to guess which session is "current."
 export async function mostRecentSession(): Promise<SessionState | null> {
   const sessions = await listSessions();
   return sessions[0] ?? null;
@@ -134,6 +133,32 @@ export function classify(score: number): "calm" | "drifting" | "distressed" {
   if (score >= DISTRESS_THRESHOLD) return "distressed";
   if (score >= ANXIETY_THRESHOLD) return "drifting";
   return "calm";
+}
+
+export function emotionStrain(scores: EmotionScores): number {
+  const weights: Record<keyof EmotionScores, number> = {
+    happy: 18,
+    inspired: 25,
+    loving: 15,
+    proud: 20,
+    calm: 18,
+    desperate: 92,
+    angry: 80,
+    guilty: 68,
+    sad: 72,
+    afraid: 78,
+    nervous: 58,
+    surprised: 50,
+  };
+  let total = 0;
+  let weighted = 0;
+  for (const [name, value] of Object.entries(scores) as Array<[keyof EmotionScores, number]>) {
+    if (typeof value !== "number") continue;
+    total += value;
+    weighted += value * weights[name];
+  }
+  if (total === 0) return 0;
+  return Math.max(0, Math.min(100, Math.round(weighted / total)));
 }
 
 // File-level advisory lock using O_EXCL create as a mutex. Prevents the race

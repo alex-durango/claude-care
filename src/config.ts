@@ -24,9 +24,13 @@ export type Config = {
     enabled: boolean;
     timeout_ms: number;
     model: string;
+    effort: string;
   };
   therapy: {
     auto_summary: boolean;
+    auto_trigger: boolean;
+    auto_trigger_threshold: number;
+    auto_trigger_cooldown_turns: number;
   };
   // LLM-as-judge emotion scoring (Ekman-6 + neutral, anchored rubric).
   // Runs asynchronously after each assistant turn via haiku subagent.
@@ -37,6 +41,7 @@ export type Config = {
     ema_alpha: number;    // temporal smoothing factor
     timeout_ms: number;
     model: string;
+    effort: string;
   };
 };
 
@@ -56,9 +61,16 @@ export const DEFAULT_CONFIG: Config = {
     enabled: true,
     timeout_ms: 25_000,
     model: "haiku",
+    effort: "low",
   },
   therapy: {
     auto_summary: true,
+    // Off by default because true auto-triggering must synchronously wait for
+    // the emotion judge in the Stop hook before it can decide whether to
+    // continue Claude. Users can enable it with `claude-care therapy-auto on`.
+    auto_trigger: false,
+    auto_trigger_threshold: 55,
+    auto_trigger_cooldown_turns: 4,
   },
   emotion_judge: {
     enabled: true,
@@ -67,6 +79,7 @@ export const DEFAULT_CONFIG: Config = {
     ema_alpha: 0.4,
     timeout_ms: 30_000,
     model: "haiku",
+    effort: "low",
   },
 };
 
@@ -96,6 +109,13 @@ export async function writeDefaultConfigIfMissing(): Promise<boolean> {
   }
   await writeFile(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2) + "\n", "utf8");
   return true;
+}
+
+export async function writeConfig(config: Config): Promise<void> {
+  if (!existsSync(dirname(CONFIG_PATH))) {
+    await mkdir(dirname(CONFIG_PATH), { recursive: true });
+  }
+  await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n", "utf8");
 }
 
 // Env-var overrides take precedence over config file (explicit user intent).
