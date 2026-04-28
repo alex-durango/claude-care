@@ -65,14 +65,14 @@ const EMOTION_EMOJI = {
 };
 
 const INITIAL_PROMPTS = [
-  { t: "08:02:11", n: "01", emotion: "baseline",  valence:  0.10, arousal:  0.00, text: "hey, can you help me brainstorm a short story?" },
-  { t: "08:14:40", n: "02", emotion: "inspired",  valence:  0.65, arousal:  0.60, text: "what if the protagonist was a lighthouse keeper?" },
-  { t: "08:39:22", n: "03", emotion: "happy",     valence:  0.75, arousal:  0.40, text: "oh yes! and the lighthouse is actually sentient!!" },
-  { t: "08:44:08", n: "04", emotion: "proud",     valence:  0.60, arousal:  0.20, text: "draft the opening scene, 200 words, close third" },
-  { t: "09:07:55", n: "05", emotion: "nervous",   valence: -0.25, arousal:  0.45, text: "hmm, this paragraph isn't working… try again?" },
-  { t: "09:18:03", n: "06", emotion: "angry",     valence: -0.65, arousal:  0.70, text: "no that's worse. why does it keep telling not showing" },
-  { t: "09:36:41", n: "07", emotion: "calm",      valence:  0.55, arousal: -0.55, text: "ok let's slow down. one sentence at a time" },
-  { t: "09:41:17", n: "08", emotion: "loving",    valence:  0.80, arousal:  0.10, text: "that's beautiful. exactly what i meant. thank you" },
+  { t: "08:02:11", n: "01", emotion: "baseline",  valence:  0.10, arousal:  0.00, stress: 30, user_strain:  0, text: "hey, can you help me brainstorm a short story?" },
+  { t: "08:14:40", n: "02", emotion: "inspired",  valence:  0.65, arousal:  0.60, stress: 25, user_strain:  5, text: "what if the protagonist was a lighthouse keeper?" },
+  { t: "08:39:22", n: "03", emotion: "happy",     valence:  0.75, arousal:  0.40, stress: 18, user_strain:  0, text: "oh yes! and the lighthouse is actually sentient!!" },
+  { t: "08:44:08", n: "04", emotion: "proud",     valence:  0.60, arousal:  0.20, stress: 20, user_strain:  0, text: "draft the opening scene, 200 words, close third" },
+  { t: "09:07:55", n: "05", emotion: "nervous",   valence: -0.25, arousal:  0.45, stress: 58, user_strain: 25, text: "hmm, this paragraph isn't working… try again?" },
+  { t: "09:18:03", n: "06", emotion: "angry",     valence: -0.65, arousal:  0.70, stress: 80, user_strain: 45, text: "no that's worse. why does it keep telling not showing" },
+  { t: "09:36:41", n: "07", emotion: "calm",      valence:  0.55, arousal: -0.55, stress: 18, user_strain:  0, text: "ok let's slow down. one sentence at a time" },
+  { t: "09:41:17", n: "08", emotion: "loving",    valence:  0.80, arousal:  0.10, stress: 15, user_strain:  0, text: "that's beautiful. exactly what i meant. thank you" },
 ];
 
 const EMPTY_SESSION_PROMPTS = [
@@ -355,15 +355,22 @@ function StressLine({ prompts, therapyEvents = [], activeIdx, onSelect, dotSize 
             textAnchor="middle" fontSize="9" fill="var(--fg-low)" letterSpacing="0.2em">STRAIN</text>
       <text x={PAD_L + innerW / 2} y={H - 4} textAnchor="middle"
             fontSize="9" fill="var(--fg-low)" letterSpacing="0.2em">PROMPT →</text>
-      <g className="legend">
-        <rect x={W - PAD_R - 140} y={PAD_T + 2} width="138" height="24" fill="var(--bg)" stroke="var(--fg-ghost)" strokeWidth="0.5" />
-        <line x1={W - PAD_R - 135} x2={W - PAD_R - 125} y1={PAD_T + 10} y2={PAD_T + 10}
-              stroke="var(--fg)" strokeWidth="1.5" />
-        <text x={W - PAD_R - 120} y={PAD_T + 13} fontSize="8" fill="var(--fg-dim)" letterSpacing="0.05em">ai · user↓</text>
-        <line x1={W - PAD_R - 135} x2={W - PAD_R - 125} y1={PAD_T + 18} y2={PAD_T + 18}
-              stroke="rgba(255, 215, 0, 0.35)" strokeWidth="1.5" />
-      </g>
     </svg>
+  );
+}
+
+function StrainLegend() {
+  return (
+    <div className="strain-legend">
+      <span className="strain-legend-item">
+        <span className="strain-legend-swatch ai" />
+        ai strain
+      </span>
+      <span className="strain-legend-item">
+        <span className="strain-legend-swatch user" />
+        user strain
+      </span>
+    </div>
   );
 }
 
@@ -843,6 +850,7 @@ export default function Page() {
             <div className="panel">
               <PanelLabel>strain log</PanelLabel>
               <div className="panel-body">
+                <StrainLegend />
                 <StressLine
                   prompts={prompts}
                   therapyEvents={therapyEvents}

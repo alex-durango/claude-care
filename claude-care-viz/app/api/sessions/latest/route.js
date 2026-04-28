@@ -440,7 +440,7 @@ function mapSessionToPrompts(session, transcriptTurns) {
     latestUserText = "";
     const pressure = Math.max(latestUserPressure, pressureFromScore(turn.score_after));
     const stress = Math.max(vectorStress(scores), pressure);
-    const userStrain = Math.max(latestUserHostility, latestUserPressure);
+    const userStrain = latestUserHostility;
     prompts.push({
       t: formatTime(turn.ts),
       ts_iso: turn.ts,
