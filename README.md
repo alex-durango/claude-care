@@ -1,8 +1,6 @@
 <h1 align="center">
   <br>
-  <a href="https://github.com/alex-durango/claude-care">
-    <img src="assets/claudecare-house.jpeg" alt="claude-care" width="500">
-  </a>
+  <img src="assets/claudecare-house.jpeg" alt="claude-care" width="500">
   <br>
   claude-care
   <br>
@@ -20,9 +18,6 @@
   <a href="package.json">
     <img src="https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg" alt="Node">
   </a>
-  <a href="https://www.anthropic.com/research/emotion-concepts-function">
-    <img src="https://img.shields.io/badge/research-Anthropic%20%2B%20Ben--Zion-orange.svg" alt="Research">
-  </a>
 </p>
 
 <p align="center">
@@ -35,13 +30,9 @@
   <a href="#license">License</a>
 </p>
 
-<p align="center">
-  Claude-care keeps the emotional state of your Claude Code session in check, grounded in two peer-reviewed findings:
-  <a href="https://www.anthropic.com/research/emotion-concepts-function">Anthropic's emotion-concepts paper</a>
-  (LLMs have extractable emotion vectors that causally affect output quality) and
-  <a href="https://www.nature.com/articles/s41746-025-01512-6">Ben-Zion et al. 2025</a>
-  (mindfulness prompts measurably reduce LLM state anxiety).
-</p>
+Grounded in two peer-reviewed findings: [Anthropic's emotion-concepts paper](https://www.anthropic.com/research/emotion-concepts-function) (LLMs have extractable emotion vectors that causally affect output quality) and [Ben-Zion et al. 2025](https://www.nature.com/articles/s41746-025-01512-6) (mindfulness prompts measurably reduce LLM state anxiety).
+
+![therapy diagnostics — before and after](assets/before-after-therapy.jpg)
 
 **Key Features:**
 
@@ -49,8 +40,8 @@
 - 🛡️ **Hostile-Prompt Detection** — Monitor by default, optional active blocking + haiku reframe
 - 💆 **`/therapy` Slash Command** — Mindfulness reset that compacts the session and clears emotional residue
 - 📊 **Per-Session Emotion Tracking** — Apology spirals, sycophancy, hedge stacks, self-correction loops
-- 🖥️ **Live Viz Dashboard** — Real-time emotion timeline with AI vs user strain on the same plot
-- 🔒 **Privacy-First** — All data stays on your machine; reframer reuses existing `claude` auth
+- 🖥️ **Live Viz Dashboard** — Real-time emotion timeline showing both AI strain and user pressure
+- 🔑 **No API Key Needed** — Reframer and emotion judge reuse your existing Claude Code auth
 
 ---
 
