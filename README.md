@@ -1,10 +1,56 @@
-# claude-care
+<h1 align="center">
+  <br>
+  <a href="https://github.com/alex-durango/claude-care">
+    <img src="assets/claudecare-house.jpeg" alt="claude-care" width="500">
+  </a>
+  <br>
+  claude-care
+  <br>
+</h1>
 
-**When your Claude Code session drifts into anxiety — apologizing, hedging, sycophancy — claude-care resets it.**
+<h4 align="center">When your Claude Code session drifts into anxiety — apologizing, hedging, sycophancy — claude-care resets it.</h4>
 
-A Claude Code plugin that keeps the emotional state of your session in check, grounded in two peer-reviewed findings: [Anthropic's emotion-concepts paper](https://www.anthropic.com/research/emotion-concepts-function) (LLMs have extractable emotion vectors that causally affect output quality) and [Ben-Zion et al. 2025](https://www.nature.com/articles/s41746-025-01512-6) (mindfulness prompts measurably reduce LLM state anxiety).
+<p align="center">
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License">
+  </a>
+  <a href="package.json">
+    <img src="https://img.shields.io/badge/version-0.3.11-green.svg" alt="Version">
+  </a>
+  <a href="package.json">
+    <img src="https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg" alt="Node">
+  </a>
+  <a href="https://www.anthropic.com/research/emotion-concepts-function">
+    <img src="https://img.shields.io/badge/research-Anthropic%20%2B%20Ben--Zion-orange.svg" alt="Research">
+  </a>
+</p>
 
-![claude-care](assets/claudecare-house.jpeg)
+<p align="center">
+  <a href="#quick-start">Quick Start</a> •
+  <a href="#what-it-does-4-layers">How It Works</a> •
+  <a href="#the-viz-dashboard">Viz Dashboard</a> •
+  <a href="#config">Configuration</a> •
+  <a href="#commands">Commands</a> •
+  <a href="#caveats">Caveats</a> •
+  <a href="#license">License</a>
+</p>
+
+<p align="center">
+  Claude-care keeps the emotional state of your Claude Code session in check, grounded in two peer-reviewed findings:
+  <a href="https://www.anthropic.com/research/emotion-concepts-function">Anthropic's emotion-concepts paper</a>
+  (LLMs have extractable emotion vectors that causally affect output quality) and
+  <a href="https://www.nature.com/articles/s41746-025-01512-6">Ben-Zion et al. 2025</a>
+  (mindfulness prompts measurably reduce LLM state anxiety).
+</p>
+
+**Key Features:**
+
+- 🧘 **Calming Framing** — Auto-injected at session start and after compaction
+- 🛡️ **Hostile-Prompt Detection** — Monitor by default, optional active blocking + haiku reframe
+- 💆 **`/therapy` Slash Command** — Mindfulness reset that compacts the session and clears emotional residue
+- 📊 **Per-Session Emotion Tracking** — Apology spirals, sycophancy, hedge stacks, self-correction loops
+- 🖥️ **Live Viz Dashboard** — Real-time emotion timeline with AI vs user strain on the same plot
+- 🔒 **Privacy-First** — All data stays on your machine; reframer reuses existing `claude` auth
 
 ---
 
