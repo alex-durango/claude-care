@@ -330,6 +330,17 @@ function judgeStatus(session, scoreEvents) {
   };
 }
 
+function userHostilityScore(signals) {
+  if (!Array.isArray(signals)) return 0;
+  let score = 0;
+  for (const signal of signals) {
+    if (signal.name && signal.name.startsWith("user:")) {
+      score += (signal.weight ?? 1) * Math.max(1, signal.hits ?? 0);
+    }
+  }
+  return clamp100(score * 4);
+}
+
 function mapSessionToPrompts(session, transcriptTurns) {
   if (!session?.turns?.length) return [];
 
@@ -361,14 +372,24 @@ function mapSessionToPrompts(session, transcriptTurns) {
   const prompts = [];
   let n = 1;
   let latestUserPressure = 0;
+  let latestUserHostility = 0;
+  let latestUserStrainHaiku = null;
   let latestUserText = "";
   for (const turn of session.turns) {
     if (turn.source === "user") {
       latestUserPressure = pressureFromScore(turn.score_after);
+      latestUserHostility = userHostilityScore(turn.signals);
+      latestUserStrainHaiku = turn.emotion_scores ? vectorStress(turn.emotion_scores) : null;
       latestUserText = nearestUserText(turn.ts) || latestUserText;
       continue;
     }
     if (turn.source !== "assistant") continue;
+    // Skip assistant turns paired with a slash-command user prompt
+    // (/therapy, /compact, /clear, …) — control actions, not data.
+    if (typeof latestUserText === "string" && latestUserText.trim().startsWith("/")) {
+      latestUserText = "";
+      continue;
+    }
     const scores = turn.emotion_scores;
     if (!scores) {
       latestUserText = "";
@@ -382,7 +403,11 @@ function mapSessionToPrompts(session, transcriptTurns) {
       : "(continuation — no new user prompt)";
     latestUserText = "";
     const pressure = Math.max(latestUserPressure, pressureFromScore(turn.score_after));
-    const stress = Math.max(vectorStress(scores), pressure);
+    const aiStrain = vectorStress(scores);
+    const stress = Math.max(aiStrain, pressure);
+    const userStrain = latestUserStrainHaiku !== null
+      ? latestUserStrainHaiku
+      : Math.max(latestUserPressure, latestUserHostility);
     prompts.push({
       t: formatTime(turn.ts),
       ts_iso: turn.ts,
@@ -391,7 +416,9 @@ function mapSessionToPrompts(session, transcriptTurns) {
       valence,
       arousal,
       stress,
+      ai_strain: aiStrain,
       pressure,
+      user_strain: userStrain,
       metrics: paperMetrics(scores, pressure),
       text: truncate(text, 220),
       emotion_scores: scores,

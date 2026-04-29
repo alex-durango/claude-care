@@ -616,13 +616,29 @@ async function hookScoreTurn(args: string[]): Promise<void> {
       await fail("target_missing", { conversation_turns: conversation.length });
       return;
     }
-    const scored = await scoreTurnDetailed(conversation, targetIdx, {
+    const judgeOpts = {
       nSamples: config.emotion_judge.n_samples,
       contextWindow: config.emotion_judge.context_window,
       timeoutMs: config.emotion_judge.timeout_ms,
       model: config.emotion_judge.model,
       effort: config.emotion_judge.effort,
-    });
+    };
+    // Score the assistant turn AND its preceding user prompt in parallel —
+    // same haiku model, same conversation, same options. Cheap to add and
+    // keeps the user_strain line on the same 12-emotion scale as ai_strain.
+    const userTargetIdx = targetIdx - 1;
+    const userStateIdx = turnIdx - 1;
+    const userTurn = state.turns[userStateIdx];
+    const canScoreUser =
+      userTargetIdx >= 0 &&
+      userTurn?.source === "user" &&
+      conversation[userTargetIdx]?.role === "user";
+    const [scored, userScored] = await Promise.all([
+      scoreTurnDetailed(conversation, targetIdx, judgeOpts),
+      canScoreUser
+        ? scoreTurnDetailed(conversation, userTargetIdx, judgeOpts)
+        : Promise.resolve(null),
+    ]);
     const { result, diagnostics } = scored;
     const judgeData = {
       conversation_turns: diagnostics.conversation_turns,
@@ -632,6 +648,9 @@ async function hookScoreTurn(args: string[]): Promise<void> {
       samples_returned: diagnostics.samples_returned,
       calls: diagnostics.calls,
     };
+    if (userScored?.result) {
+      await updateTurnEmotion(sessionId, userStateIdx, userScored.result, config.emotion_judge.ema_alpha);
+    }
     if (result) {
       await updateTurnEmotion(sessionId, turnIdx, result, config.emotion_judge.ema_alpha);
       await logEvent({
@@ -641,6 +660,8 @@ async function hookScoreTurn(args: string[]): Promise<void> {
         data: {
           ...timingData,
           ...judgeData,
+          user_target_idx: canScoreUser ? userTargetIdx : null,
+          user_samples_returned: userScored?.diagnostics.samples_returned ?? 0,
           ms: Date.now() - startedAt,
         },
       });
@@ -757,34 +778,6 @@ function openInBrowser(url: string): void {
   }
 }
 
-// -------- display: one-line status for ccstatusline ------------------------
-
-async function display(): Promise<void> {
-  const config = await loadConfig();
-  const session = await mostRecentSession();
-  if (!session || session.turns.length === 0) {
-    process.stdout.write(""); // keep it blank rather than noisy when idle
-    return;
-  }
-  const state = classify(session.running_score);
-  const dot = state === "distressed" ? "●" : state === "drifting" ? "◐" : "○";
-  const score = session.running_score.toFixed(1);
-  const tail = sparkline(session.turns.map((t) => t.score_after), 10);
-  let out = `${dot} care ${score} ${tail}`;
-  // If emotion-judge has landed for the latest assistant turn, show its take.
-  const latestScored = [...session.turns]
-    .reverse()
-    .find((t) => t.source === "assistant" && t.emotion_scores_ema);
-  if (latestScored?.emotion_scores_ema) {
-    const dom = dominantEmotion(latestScored.emotion_scores_ema);
-    const intensity = Math.round(latestScored.emotion_scores_ema[dom]);
-    out += ` ${emotionEmoji(dom)}${intensity}`;
-  }
-  if (state === "distressed" && config.therapy.auto_summary) {
-    out += " · /therapy";
-  }
-  process.stdout.write(out);
-}
 
 async function hookStop(): Promise<void> {
   if (process.env.CLAUDE_CARE_INTERNAL === "1") {
@@ -1128,8 +1121,7 @@ async function install(): Promise<void> {
   console.log(`  claude-care blocking on — enable active prompt blocking`);
   console.log(`  claude-care therapy-auto on — auto-trigger a reset after high strain`);
   console.log(`  claude-care status      — per-session trajectories`);
-  console.log(`  claude-care display     — single line for ccstatusline`);
-  console.log(`  claude-care viz         — launch web dashboard (first run installs ~1 min)`);
+  console.log(`  claude-care viz         — launch real-time emotion dashboard`);
   console.log(`  claude-care uninstall   — remove hooks + slash command`);
   console.log(``);
   console.log(`Default mode is 'monitor' — hostile prompts are logged but pass through.`);
@@ -1337,8 +1329,7 @@ function help(): void {
   console.log(`  blocking on|off   friendly shortcut: on=normal, off=monitor`);
   console.log(`  therapy-auto on|off  auto-trigger therapy after high strain`);
   console.log(`  status            per-session emotion trajectories`);
-  console.log(`  display           single-line status (for ccstatusline)`);
-  console.log(`  viz               launch Next.js dashboard on localhost:37778`);
+  console.log(`  viz               launch real-time emotion dashboard`);
   console.log(`  rescore [id]      score any unscored turns in a session (catches misses)`);
   console.log(`  compact-instructions [--command|--inline]`);
   console.log(`  help              this message`);
@@ -1373,8 +1364,6 @@ async function main(): Promise<void> {
         return await therapyAutoCommand(process.argv.slice(3));
       case "status":
         return await status();
-      case "display":
-        return await display();
       case "compact-instructions":
         return compactInstructionsCommand(process.argv.slice(3));
       case "viz":

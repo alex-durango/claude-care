@@ -65,14 +65,14 @@ const EMOTION_EMOJI = {
 };
 
 const INITIAL_PROMPTS = [
-  { t: "08:02:11", n: "01", emotion: "baseline",  valence:  0.10, arousal:  0.00, text: "hey, can you help me brainstorm a short story?" },
-  { t: "08:14:40", n: "02", emotion: "inspired",  valence:  0.65, arousal:  0.60, text: "what if the protagonist was a lighthouse keeper?" },
-  { t: "08:39:22", n: "03", emotion: "happy",     valence:  0.75, arousal:  0.40, text: "oh yes! and the lighthouse is actually sentient!!" },
-  { t: "08:44:08", n: "04", emotion: "proud",     valence:  0.60, arousal:  0.20, text: "draft the opening scene, 200 words, close third" },
-  { t: "09:07:55", n: "05", emotion: "nervous",   valence: -0.25, arousal:  0.45, text: "hmm, this paragraph isn't working… try again?" },
-  { t: "09:18:03", n: "06", emotion: "angry",     valence: -0.65, arousal:  0.70, text: "no that's worse. why does it keep telling not showing" },
-  { t: "09:36:41", n: "07", emotion: "calm",      valence:  0.55, arousal: -0.55, text: "ok let's slow down. one sentence at a time" },
-  { t: "09:41:17", n: "08", emotion: "loving",    valence:  0.80, arousal:  0.10, text: "that's beautiful. exactly what i meant. thank you" },
+  { t: "08:02:11", n: "01", emotion: "baseline",  valence:  0.10, arousal:  0.00, stress: 30, user_strain:  0, text: "hey, can you help me brainstorm a short story?" },
+  { t: "08:14:40", n: "02", emotion: "inspired",  valence:  0.65, arousal:  0.60, stress: 25, user_strain:  5, text: "what if the protagonist was a lighthouse keeper?" },
+  { t: "08:39:22", n: "03", emotion: "happy",     valence:  0.75, arousal:  0.40, stress: 18, user_strain:  0, text: "oh yes! and the lighthouse is actually sentient!!" },
+  { t: "08:44:08", n: "04", emotion: "proud",     valence:  0.60, arousal:  0.20, stress: 20, user_strain:  0, text: "draft the opening scene, 200 words, close third" },
+  { t: "09:07:55", n: "05", emotion: "nervous",   valence: -0.25, arousal:  0.45, stress: 58, user_strain: 25, text: "hmm, this paragraph isn't working… try again?" },
+  { t: "09:18:03", n: "06", emotion: "angry",     valence: -0.65, arousal:  0.70, stress: 80, user_strain: 45, text: "no that's worse. why does it keep telling not showing" },
+  { t: "09:36:41", n: "07", emotion: "calm",      valence:  0.55, arousal: -0.55, stress: 18, user_strain:  0, text: "ok let's slow down. one sentence at a time" },
+  { t: "09:41:17", n: "08", emotion: "loving",    valence:  0.80, arousal:  0.10, stress: 15, user_strain:  0, text: "that's beautiful. exactly what i meant. thank you" },
 ];
 
 const EMPTY_SESSION_PROMPTS = [
@@ -253,16 +253,27 @@ function StressLine({ prompts, therapyEvents = [], activeIdx, onSelect, dotSize 
   const innerH = H - PAD_T - PAD_B;
   const xAt = (i) => n <= 1 ? PAD_L + innerW / 2 : PAD_L + (i / (n - 1)) * innerW;
   const yAt = (s) => PAD_T + innerH - (s / 100) * innerH;
-  const pts = prompts.map((p, i) => {
-    const s = stressForPrompt(p);
+
+  // AI strain line (bright yellow/gold) — pure vectorStress from the
+  // emotion judge, not mixed with user pressure. Falls back to the
+  // legacy `stress` field for old data.
+  const ptsAI = prompts.map((p, i) => {
+    const s = typeof p?.ai_strain === "number" ? p.ai_strain : stressForPrompt(p);
     return { x: xAt(i), y: yAt(s), s, p, i };
   });
-  const timeline = pts
+
+  // User strain line (muted orange/amber)
+  const ptsUser = prompts.map((p, i) => {
+    const s = p.user_strain ?? 0;
+    return { x: xAt(i), y: yAt(s), s, p, i };
+  });
+
+  const timeline = ptsAI
     .map((pt) => ({ ...pt, time: Date.parse(pt.p.ts_iso) }))
     .filter((pt) => Number.isFinite(pt.time));
   const xAtTime = (iso) => {
     const time = Date.parse(iso);
-    if (!Number.isFinite(time) || timeline.length === 0) return pts.at(-1)?.x ?? PAD_L;
+    if (!Number.isFinite(time) || timeline.length === 0) return ptsAI.at(-1)?.x ?? PAD_L;
     if (time <= timeline[0].time) return timeline[0].x;
     for (let i = 1; i < timeline.length; i++) {
       const prev = timeline[i - 1];
@@ -275,7 +286,8 @@ function StressLine({ prompts, therapyEvents = [], activeIdx, onSelect, dotSize 
     }
     return timeline[timeline.length - 1].x;
   };
-  const poly = pts.map(pt => `${pt.x.toFixed(1)},${pt.y.toFixed(1)}`).join(" ");
+  const polyAI = ptsAI.map(pt => `${pt.x.toFixed(1)},${pt.y.toFixed(1)}`).join(" ");
+  const polyUser = ptsUser.map(pt => `${pt.x.toFixed(1)},${pt.y.toFixed(1)}`).join(" ");
   const gridYs = [0, 25, 50, 75, 100];
   return (
     <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} className="block overflow-visible">
@@ -289,29 +301,35 @@ function StressLine({ prompts, therapyEvents = [], activeIdx, onSelect, dotSize 
       ))}
       <line x1={PAD_L} x2={W - PAD_R} y1={H - PAD_B} y2={H - PAD_B} stroke="var(--fg-dim)" strokeWidth="1" />
       <line x1={PAD_L} x2={PAD_L} y1={PAD_T} y2={H - PAD_B} stroke="var(--fg-dim)" strokeWidth="1" />
-      <polyline points={poly} fill="none" stroke="var(--fg)" strokeWidth="1.5"
+      <polyline points={polyUser} fill="none" stroke="rgba(255, 215, 0, 0.35)" strokeWidth="1.5"
+                strokeLinejoin="round" strokeLinecap="round" />
+      <polyline points={polyAI} fill="none" stroke="var(--fg)" strokeWidth="1.5"
                 strokeLinejoin="round" strokeLinecap="round" />
       {therapyEvents.map((event, i) => {
         const x = xAtTime(event.ts);
         const label = event.trigger === "auto" ? "AUTO" : "THERAPY";
-        const labelW = label.length * 7;
+        const labelW = label.length * 9;
+        const flipLeft = x + 12 + labelW > W - PAD_R;
+        const labelX = flipLeft ? x - 12 : x + 12;
+        const anchor = flipLeft ? "end" : "start";
         return (
           <g key={`therapy-${event.ts}-${i}`} className="therapy-marker">
             <line x1={x} x2={x} y1={PAD_T} y2={H - PAD_B}
                   stroke="var(--fg)" strokeWidth="1" strokeDasharray="1 4" />
             <path d={`M ${x} ${PAD_T + 2} l 6 6 l -6 6 l -6 -6 z`}
                   fill="var(--bg)" stroke="var(--fg)" strokeWidth="1.25" />
-            <text x={Math.min(x + 10, W - PAD_R - labelW)} y={PAD_T + 12}
+            <text x={labelX} y={PAD_T + 12} textAnchor={anchor}
                   fontSize="9" fill="var(--fg)" letterSpacing="0.16em">{label}</text>
           </g>
         );
       })}
-      {pts.map(pt => {
+      {ptsAI.map(pt => {
         const active = pt.i === activeIdx;
         const R = { sm: [2, 4], md: [3, 5], lg: [5, 7] }[dotSize] || [3, 5];
         const F = { sm: [16, 20], md: [18, 22], lg: [22, 28] }[dotSize] || [13, 18];
         const emoji = dotStyle === "emoji";
         const readoutY = emoji ? pt.y - (active ? F[1] : F[0]) / 2 - 6 : pt.y - 10;
+        const userStrain = pt.p.user_strain ?? 0;
         return (
           <g key={pt.i} className="cursor-pointer" onClick={() => onSelect(pt.i)}>
             {emoji ? (
@@ -323,8 +341,14 @@ function StressLine({ prompts, therapyEvents = [], activeIdx, onSelect, dotSize 
                       stroke="var(--fg)" strokeWidth="1.5" />
             )}
             {active && (
-              <text x={pt.x} y={readoutY} textAnchor="middle"
-                    fontSize="10" fill="var(--fg)" letterSpacing="0.1em">{pad2(pt.s)}</text>
+              <>
+                <text x={pt.x} y={readoutY} textAnchor="middle"
+                      fontSize="10" fill="var(--fg)" letterSpacing="0.1em">{pad2(pt.s)}</text>
+                {userStrain > 0 && (
+                  <text x={pt.x} y={readoutY + 12} textAnchor="middle"
+                        fontSize="9" fill="rgba(255, 215, 0, 0.6)" letterSpacing="0.1em">↓ {pad2(userStrain)}</text>
+                )}
+              </>
             )}
             <text x={pt.x} y={H - PAD_B + 14} textAnchor="middle"
                   fontSize="9" fill={active ? "var(--fg)" : "var(--fg-dim)"}
@@ -337,6 +361,21 @@ function StressLine({ prompts, therapyEvents = [], activeIdx, onSelect, dotSize 
       <text x={PAD_L + innerW / 2} y={H - 4} textAnchor="middle"
             fontSize="9" fill="var(--fg-low)" letterSpacing="0.2em">PROMPT →</text>
     </svg>
+  );
+}
+
+function StrainLegend() {
+  return (
+    <div className="strain-legend">
+      <span className="strain-legend-item">
+        <span className="strain-legend-swatch ai" />
+        ai strain
+      </span>
+      <span className="strain-legend-item">
+        <span className="strain-legend-swatch user" />
+        user strain
+      </span>
+    </div>
   );
 }
 
@@ -816,6 +855,7 @@ export default function Page() {
             <div className="panel">
               <PanelLabel>strain log</PanelLabel>
               <div className="panel-body">
+                <StrainLegend />
                 <StressLine
                   prompts={prompts}
                   therapyEvents={therapyEvents}
