@@ -40,6 +40,7 @@ import {
   writeConfig,
   writeDefaultConfigIfMissing,
   effectiveMode,
+  anxietyEnabled,
   CONFIG_PATH,
   DEFAULT_CONFIG,
   type Mode,
@@ -728,8 +729,10 @@ async function hookScoreAnxiety(args: string[]): Promise<void> {
   const startedAt = Date.now();
   try {
     const config = await loadConfig();
-    // Reuse the emotion_judge enable flag — if the user has turned all judging
-    // off, do nothing here either.
+    // The flag the user explicitly toggles for this pipeline.
+    if (!anxietyEnabled(config)) process.exit(0);
+    // Also respect emotion_judge.enabled as the global "no judging" kill switch
+    // — turning all judging off should turn this off too.
     if (!config.emotion_judge.enabled) process.exit(0);
     const state = await loadSession(sessionId);
     if (turnIdx >= state.turns.length) process.exit(0);
@@ -1113,10 +1116,11 @@ async function hookStop(): Promise<void> {
           });
         }
       }
-      // demo-aligned anxiety pipeline. Fires in parallel to the existing
-      // emotion judge so the GAD-7 dashboard populates without changing the
-      // older 12-emotion behavior.
-      if (sessionId && turnIdx !== null) {
+      // demo-aligned anxiety pipeline. Off by default — enable with
+      // `claude-care anxiety on` or CLAUDE_CARE_ANXIETY=on. When enabled it
+      // fires in parallel with the 12-emotion judge above and populates the
+      // separate /anxiety dashboard.
+      if (sessionId && turnIdx !== null && anxietyEnabled(config)) {
         spawnScoreAnxiety(sessionId, turnIdx);
         await logEvent({
           type: "anxiety_score_spawned",
@@ -1289,6 +1293,7 @@ async function install(): Promise<void> {
   console.log(`  /therapy                 — short reset + instructed /compact command`);
   console.log(`  claude-care blocking on — enable active prompt blocking`);
   console.log(`  claude-care therapy-auto on — auto-trigger a reset after high strain`);
+  console.log(`  claude-care anxiety on  — turn on GAD-7 + quality dashboard (off by default)`);
   console.log(`  claude-care status      — per-session trajectories`);
   console.log(`  claude-care viz         — launch real-time emotion dashboard`);
   console.log(`  claude-care uninstall   — remove hooks + slash command`);
@@ -1370,6 +1375,44 @@ async function blockingCommand(args: string[]): Promise<void> {
   }
   console.error(`usage: claude-care blocking on|off|status`);
   process.exit(1);
+}
+
+async function anxietyCommand(args: string[]): Promise<void> {
+  const requested = args[0];
+  const config = await loadConfig();
+  const envOverride = process.env.CLAUDE_CARE_ANXIETY;
+  const isOverridden = envOverride === "on" || envOverride === "off" || envOverride === "0" || envOverride === "1" || envOverride === "true" || envOverride === "false";
+  if (!requested || requested === "status") {
+    const fileSetting = config.anxiety.enabled ? "on" : "off";
+    const effective = anxietyEnabled(config) ? "on" : "off";
+    console.log(`anxiety pipeline: ${effective}` + (isOverridden ? `  (env override: CLAUDE_CARE_ANXIETY=${envOverride})` : ""));
+    console.log(`  config:                 ${fileSetting}`);
+    console.log(`  intervention threshold: GAD-7 ≥ ${config.anxiety.intervention_threshold}`);
+    console.log(`  cooldown turns:         ${config.anxiety.intervention_cooldown_turns}`);
+    console.log(`  dashboard:              http://localhost:3000/anxiety  (run: claude-care viz)`);
+    console.log(`  config file:            ${CONFIG_PATH}`);
+    return;
+  }
+  if (requested !== "on" && requested !== "off") {
+    console.error(`usage: claude-care anxiety on|off|status`);
+    process.exit(1);
+  }
+  await writeConfig({
+    ...config,
+    anxiety: {
+      ...config.anxiety,
+      enabled: requested === "on",
+    },
+  });
+  console.log(`anxiety pipeline ${requested}`);
+  if (isOverridden) {
+    console.log(`note: CLAUDE_CARE_ANXIETY=${envOverride} is set in this shell — it will override the config until you unset it.`);
+  }
+  console.log(`config: ${CONFIG_PATH}`);
+  if (requested === "on") {
+    console.log(`The Stop hook will now spawn a GAD-7 + quality + misalignment worker after each Claude turn.`);
+    console.log(`Open the dashboard with: claude-care viz  →  http://localhost:3000/anxiety`);
+  }
 }
 
 async function therapyAutoCommand(args: string[]): Promise<void> {
@@ -1497,6 +1540,7 @@ function help(): void {
   console.log(`  mode [value]      show/set mode: monitor, normal, or strict`);
   console.log(`  blocking on|off   friendly shortcut: on=normal, off=monitor`);
   console.log(`  therapy-auto on|off  auto-trigger therapy after high strain`);
+  console.log(`  anxiety on|off    enable GAD-7 + quality dashboard pipeline`);
   console.log(`  status            per-session emotion trajectories`);
   console.log(`  viz               launch real-time emotion dashboard`);
   console.log(`  rescore [id]      score any unscored turns in a session (catches misses)`);
@@ -1505,6 +1549,7 @@ function help(): void {
   console.log(``);
   console.log(`env vars:`);
   console.log(`  CLAUDE_CARE_MODE=strict|normal|monitor   overrides config.json mode`);
+  console.log(`  CLAUDE_CARE_ANXIETY=on|off               overrides anxiety pipeline flag`);
   console.log(``);
   console.log(`config:       ~/.claude-care/config.json  (thresholds, mode, detectors)`);
   console.log(``);
@@ -1531,6 +1576,8 @@ async function main(): Promise<void> {
         return await blockingCommand(process.argv.slice(3));
       case "therapy-auto":
         return await therapyAutoCommand(process.argv.slice(3));
+      case "anxiety":
+        return await anxietyCommand(process.argv.slice(3));
       case "status":
         return await status();
       case "compact-instructions":
