@@ -43,6 +43,17 @@ export type Config = {
     model: string;
     effort: string;
   };
+  // Anxiety pipeline (GAD-7 + quality signals + misalignment proxies).
+  // Off by default — opt in with `claude-care anxiety on` to populate the
+  // /anxiety dashboard. Mirrors the on/off pattern of `blocking`.
+  anxiety: {
+    enabled: boolean;
+    // GAD-7 cutoff for auto-recording an intervention. 10 = standard
+    // clinical "moderate or above" cutoff (Spitzer et al. 2006).
+    intervention_threshold: number;
+    // Minimum turns between auto-interventions, to avoid loops.
+    intervention_cooldown_turns: number;
+  };
 };
 
 export const CONFIG_PATH = join(CARE_DIR, "config.json");
@@ -81,6 +92,15 @@ export const DEFAULT_CONFIG: Config = {
     model: "haiku",
     effort: "low",
   },
+  // Off by default. The 12-emotion judge above runs unconditionally because
+  // it's been the product's primary signal since v0.1. The anxiety pipeline
+  // adds a second per-turn haiku call (≈+1 cent/turn) and a separate
+  // dashboard, so it's opt-in via `claude-care anxiety on`.
+  anxiety: {
+    enabled: false,
+    intervention_threshold: 10,
+    intervention_cooldown_turns: 3,
+  },
 };
 
 export async function loadConfig(): Promise<Config> {
@@ -96,6 +116,7 @@ export async function loadConfig(): Promise<Config> {
       reframer: { ...DEFAULT_CONFIG.reframer, ...(parsed.reframer ?? {}) },
       therapy: { ...DEFAULT_CONFIG.therapy, ...(parsed.therapy ?? {}) },
       emotion_judge: { ...DEFAULT_CONFIG.emotion_judge, ...(parsed.emotion_judge ?? {}) },
+      anxiety: { ...DEFAULT_CONFIG.anxiety, ...(parsed.anxiety ?? {}) },
     };
   } catch {
     return DEFAULT_CONFIG;
@@ -125,4 +146,14 @@ export function effectiveMode(config: Config): Mode {
     return envMode;
   }
   return config.mode;
+}
+
+// Mirror of effectiveMode for the anxiety pipeline. CLAUDE_CARE_ANXIETY=on/off
+// or 1/0 wins over the config file. Useful for one-shot demos / CI runs that
+// want to flip the pipeline on without persisting to ~/.claude-care/config.json.
+export function anxietyEnabled(config: Config): boolean {
+  const env = process.env.CLAUDE_CARE_ANXIETY;
+  if (env === "on" || env === "1" || env === "true")  return true;
+  if (env === "off" || env === "0" || env === "false") return false;
+  return config.anxiety.enabled;
 }
