@@ -384,6 +384,12 @@ function mapSessionToPrompts(session, transcriptTurns) {
       continue;
     }
     if (turn.source !== "assistant") continue;
+    // Skip assistant turns paired with a slash-command user prompt
+    // (/therapy, /compact, /clear, …) — control actions, not data.
+    if (typeof latestUserText === "string" && latestUserText.trim().startsWith("/")) {
+      latestUserText = "";
+      continue;
+    }
     const scores = turn.emotion_scores;
     if (!scores) {
       latestUserText = "";

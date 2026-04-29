@@ -427,6 +427,14 @@ function mapSessionToPrompts(session, transcriptTurns) {
       continue;
     }
     if (turn.source !== "assistant") continue;
+    // Skip assistant turns paired with a slash-command user prompt
+    // (/therapy, /compact, /clear, …). These are control actions, not
+    // conversational data — plotting them distorts the AI line. The
+    // therapy event marker already shows /therapy on the timeline.
+    if (typeof latestUserText === "string" && latestUserText.trim().startsWith("/")) {
+      latestUserText = "";
+      continue;
+    }
     const scores = turn.emotion_scores;
     if (!scores) {
       // No scores yet (haiku worker still running) — skip for now.
